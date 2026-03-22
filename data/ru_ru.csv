@@ -583,7 +583,7 @@ st_gamma_recipe_advanced_3,Основы улучшения оружия и брони Том 2
 st_ecologist_outfit_blue_name,ССП-99М «Сапфир»
 st_cigar1,Советские сигареты
 st_prt_i_paper,Листы бумаги
-st_itm_desc_eat_thirst,%s %s жажды
+st_data_export_thirst,Жажда
 ammo-5.7x28-ss195,Патроны 5.7x28 мм ЭП
 zaton,Затон
 st_data_export_disassemble_result,Результат
@@ -1007,7 +1007,7 @@ st_glue_a,Тюбик клея «Tur»
 st_marijuana,Марихуана
 st_bolt_carrier_9,Колодка от курковки [Р] (Продольно-скользящий затвор)
 csky_novice_outfit_name,Кожаная куртка «Чистого неба»
-st_itm_desc_eat_sleepiness,%s %s сонливости
+st_data_export_sleepiness,Сонливость
 l12_stancia,ЧАЭС (ЮГ)
 cs_nbc_outfit_name,Комбинезон ЧН-3 «РХБЗ»
 bandit_scientific_outfit_name,Трофейная «СЕВА»

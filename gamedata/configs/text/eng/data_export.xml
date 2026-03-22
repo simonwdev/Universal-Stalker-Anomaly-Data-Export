@@ -204,4 +204,10 @@
     <string id="st_data_export_is_backpack">
         <text>Is backpack</text>
     </string>
+    <string id="st_data_export_sleepiness">
+        <text>Sleepiness</text>
+    </string>
+    <string id="st_data_export_thirst">
+        <text>Thirst</text>
+    </string>
 </string_table>

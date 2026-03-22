@@ -204,4 +204,10 @@
     <string id="st_data_export_is_backpack">
         <text>Рюкзак</text>
     </string>
+    <string id="st_data_export_sleepiness">
+        <text>Сонливости</text>
+    </string>
+    <string id="st_data_export_thirst">
+        <text>Жажда</text>
+    </string>
 </string_table>

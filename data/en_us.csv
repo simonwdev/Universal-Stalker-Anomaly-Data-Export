@@ -583,7 +583,7 @@ st_gamma_recipe_advanced_3,Fundamentals of Guns and Armors Upgrades Vol. 2
 st_ecologist_outfit_blue_name,SSP-99M "Sapphire"
 st_cigar1,Cigarettes (Soviet)
 st_prt_i_paper,Paper Sheets
-st_itm_desc_eat_thirst,%s thirstiness %s
+st_data_export_thirst,Thirstiness
 ammo-5.7x28-ss195,5.7x28 mm SS195 rounds
 zaton,Zaton
 st_data_export_disassemble_result,Result
@@ -1007,7 +1007,7 @@ st_glue_a,Glue Tube "Tur"
 st_marijuana,Marijuana
 st_bolt_carrier_9,Choke from Double-barrel Shotgun [R] (Carrier)
 csky_novice_outfit_name,Clear Sky Leather Jacket
-st_itm_desc_eat_sleepiness,%s sleepiness %s
+st_data_export_sleepiness,Sleepiness
 l12_stancia,Chernobyl NPP (South)
 cs_nbc_outfit_name,CS-2t Suit
 bandit_scientific_outfit_name,Looted SEVA Suit
