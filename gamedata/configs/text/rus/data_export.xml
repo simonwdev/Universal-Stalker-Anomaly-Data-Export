@@ -201,4 +201,7 @@
     <string id="st_data_export_ammo_box_size">
         <text>В пачке</text>
     </string>
+    <string id="st_data_export_is_backpack">
+        <text>Рюкзак</text>
+    </string>
 </string_table>

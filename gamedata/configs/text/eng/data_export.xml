@@ -201,4 +201,7 @@
     <string id="st_data_export_ammo_box_size">
         <text>Box size</text>
     </string>
+    <string id="st_data_export_is_backpack">
+        <text>Is backpack</text>
+    </string>
 </string_table>
