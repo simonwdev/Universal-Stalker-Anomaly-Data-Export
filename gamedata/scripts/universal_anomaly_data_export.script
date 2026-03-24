@@ -13,6 +13,7 @@ local cmd_list = {
     { name = "Export melee", cmd = "export_melee", hide_ui = 0 },
     { name = "Export ammo", cmd = "export_ammo", hide_ui = 0 },
     { name = "Export stash drop rates", cmd = "export_stash_drop_rates", hide_ui = 0 },
+    { name = "Export toolkit map rates", cmd = "export_toolkit_map_rates", hide_ui = 0 },
     { name = "Export item drop locations", cmd = "item_drop_locations", hide_ui = 0 },
     { name = "Export disassemble table", cmd = "export_disassemble_table", hide_ui = 0 },
     { name = "Export outfit exchange table", cmd = "export_outfit_exchange", hide_ui = 0 },
@@ -2560,6 +2561,80 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
 
     out:close()
     x:SendOutput("[END] export stash drop rates - %s map rows written - see export_stash_drop_rates.csv", row_count)
+end
+
+function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
+    x:SendOutput("[START] export toolkit map rates")
+
+    -- Toolkit probability per tier (steady-state: all prerequisite kits already found)
+    local toolkit_probs = {
+        [1] = { itm_ammokit = 1/2,   itm_drugkit = 1/2 },
+        [2] = { itm_ammokit = 1/4,   itm_drugkit = 1/4,   itm_basickit = 2/4 },
+        [3] = { itm_ammokit = 2/11,  itm_drugkit = 2/11,  itm_basickit = 5/11, itm_advancedkit = 2/11 },
+        [4] = { itm_advancedkit = 1 },
+        [5] = { itm_expertkit   = 1 },
+    }
+    local toolkit_order = { "itm_basickit", "itm_advancedkit", "itm_expertkit", "itm_drugkit", "itm_ammokit" }
+
+    -- Resolve toolkit display names for column headers
+    local toolkit_names = {}
+    for _, sec in ipairs(toolkit_order) do
+        toolkit_names[sec] = translate_with_context(ini_sys:r_string_ex(sec, "inv_name"), "toolkit name for " .. sec)
+    end
+
+    -- Open output file
+    local p_file = "export_toolkit_map_rates.csv"
+    local out = io.open(p_file, "w+")
+
+    -- Write header
+    local header_parts = { "~", translate("st_data_export_stash_map") }
+    for _, sec in ipairs(toolkit_order) do
+        header_parts[#header_parts + 1] = toolkit_names[sec]
+    end
+    out:write(table.concat(header_parts, ",") .. "\n")
+
+    -- Sort maps alphabetically
+    local sorted_maps = {}
+    for map_name in pairs(treasure_manager.tools_map_tiers) do
+        sorted_maps[#sorted_maps + 1] = map_name
+    end
+    table.sort(sorted_maps)
+
+    -- Compute and write one row per map
+    local row_count = 0
+    for _, map_name in ipairs(sorted_maps) do
+        local vec = treasure_manager.tools_map_tiers[map_name]
+
+        -- Count tier occurrences
+        local tier_counts = {}
+        for _, t in ipairs(vec) do
+            tier_counts[t] = (tier_counts[t] or 0) + 1
+        end
+        local vec_size = #vec
+
+        -- Weighted sum of per-tier toolkit probabilities
+        local kit_pct = {}
+        for tier, count in pairs(tier_counts) do
+            local tier_prob = count / vec_size
+            local probs = toolkit_probs[tier]
+            if probs then
+                for sec, p in pairs(probs) do
+                    kit_pct[sec] = (kit_pct[sec] or 0) + tier_prob * p
+                end
+            end
+        end
+
+        -- Build row
+        local cols = { map_name, translate(map_name) }
+        for _, sec in ipairs(toolkit_order) do
+            cols[#cols + 1] = to_percent_stash((kit_pct[sec] or 0)*100)
+        end
+        out:write(table.concat(cols, ",") .. "\n")
+        row_count = row_count + 1
+    end
+
+    out:close()
+    x:SendOutput("[END] export toolkit map rates - %s map rows written - see export_toolkit_map_rates.csv", row_count)
 end
 
 function debug_cmd_list.cmd.item_drop_locations(_, txt, x)
