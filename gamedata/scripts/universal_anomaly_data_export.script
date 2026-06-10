@@ -82,7 +82,7 @@ local headers_mode = 1 -- Required for items DB
 function debug_cmd_list.cmd.change_headers_mode(_, txt, x)
     headers_mode = (headers_mode + 1) % 2
     local mode_text = headers_mode == 0 and "Translated" or "Translation Keys"
-    x:SendOutput("Headers mode changed to %s", mode_text)
+    send_log(x, "Headers mode changed to %s", mode_text)
 end
 
 
@@ -287,10 +287,10 @@ function sort_keys(map)
 end
 
 function debug_cmd_list.cmd.export_translation_keys(_, txt, x)
-    x:SendOutput("[START] export translation keys")
+    send_log(x, "[START] export translation keys")
     local f = file_for_write("translation_keys.csv")
     if not f then
-        x:SendOutput("Failed to create translation_keys.csv")
+        send_log(x, "Failed to create translation_keys.csv")
         return
     end
     local sorted_keys = sort_keys(translated_keys)
@@ -298,18 +298,18 @@ function debug_cmd_list.cmd.export_translation_keys(_, txt, x)
         f:write(key .. "\n")
     end
     f:close()
-    x:SendOutput("[END] export translation keys - %s keys written", #sorted_keys)
+    send_log(x, "[END] export translation keys - %s keys written", #sorted_keys)
 end
 
 function debug_cmd_list.cmd.export_translations(_, txt, x)
-    x:SendOutput("[START] export translations")
+    send_log(x, "[START] export translations")
 
     local file = debug_cmd_list.split(txt) or {}
     if not file[1] then file[1] = init_folder end
 
     local keys_file = file_for_read("translation_keys.csv", file[1])
     if not keys_file then
-        x:SendOutput("translation_keys.csv not found - run Export translation keys first")
+        send_log(x, "translation_keys.csv not found - run Export translation keys first")
         return
     end
     local keys = {}
@@ -326,7 +326,7 @@ function debug_cmd_list.cmd.export_translations(_, txt, x)
     local p_file = locale .. ".csv"
     local debug_file = file_for_write(p_file, file[1])
     if not debug_file then
-        x:SendOutput("Failed to create/open file %s", p_file)
+        send_log(x, "Failed to create/open file %s", p_file)
         return
     end
     write_csv_header(debug_file, "Translation Key,Translated Value")
@@ -336,7 +336,7 @@ function debug_cmd_list.cmd.export_translations(_, txt, x)
         cnt = cnt + 1
     end
     debug_file:close()
-    x:SendOutput("[END] export translations - %s total keys exported", cnt)
+    send_log(x, "[END] export translations - %s total keys exported", cnt)
 end
 
 function translate_headers(headers)
@@ -401,8 +401,37 @@ function parse_condlist(str)
     return result
 end
 
+-- Write a message to both the in-game debug console and the xray log file.
+-- SendOutput only reaches the console; printf only reaches the log. Mirrors the
+-- weapon exporter's logging so outfit progress/failures are visible in xray_*.log.
+function send_log(x, fmt, ...)
+    printf(fmt, ...)
+    if x then
+        x:SendOutput(fmt, ...)
+    end
+end
+
+-- Re-run `callback(...)` every `delay` seconds until it returns a truthy value.
+-- Each attempt registers under a unique event name (`name .. attempt`): the
+-- time-event queue de-dupes by name, so reusing one name lets the re-registered
+-- retry be dropped and the callback would only ever run once. Used by the async
+-- (spawn-then-read) exporters for both per-item reads and batch-completion polls.
+function retry_event(name, delay, callback, ...)
+    local args = { ... }
+    local argc = select("#", ...)
+    local function step(attempt)
+        CreateTimeEvent(name .. attempt, "delay_func", delay, function(...)
+            if not callback(...) then
+                step(attempt + 1)
+            end
+            return true
+        end, unpack(args, 1, argc))
+    end
+    step(0)
+end
+
 function debug_cmd_list.cmd.export_outfits(_, txt, x)
-    x:SendOutput("[START] export outfit")
+    send_log(x, "[START] export outfit")
 
     local outfit_cls = {
         ["o_helmet"] = true,
@@ -459,7 +488,7 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
         local class = ini_sys:r_string_ex(section, "class")
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
-        --x:SendOutput("export outfit - %s, kind %s", section, kind)
+        --send_log(x, "export outfit - %s, kind %s", section, kind)
         if kind then
             class = kind
         end
@@ -474,7 +503,7 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
 
             if not se_obj then
                 printf("No server object made for [%s]", section)
-                --x:SendOutput( "No server object made for [%s]", section)
+                --send_log(x,  "No server object made for [%s]", section)
                 return
             end
             cnt = cnt + 1
@@ -493,25 +522,15 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
             local id = se_obj.id
 
             leftovers[section] = true
-            x:SendOutput("export outfit - %s, start", section)
-            local function createInterval(section, id, callback)
-                CreateTimeEvent("export_outfit_" .. section, "delay_func", 2, function(section, id)
-                    local success = callback(section, id)
-                    if not success then
-                        createInterval(section, id, callback)
-                    end
-                    return true
-                end, section, id)
-            end
-
-            createInterval(section, id, function(section, id)
+            send_log(x, "export outfit - %s, start", section)
+            retry_event("export_outfit_" .. section, 2, function(section, id)
                 local obj = level.object_by_id(id)
                 if not obj then
-                    --x:SendOutput("export outfit - %s, still online", section)
+                    --send_log(x, "export outfit - %s, still online", section)
                     return false
                 end
 
-                --x:SendOutput("export outfit - %s, back offline", section)
+                --send_log(x, "export outfit - %s, back offline", section)
                 local outfit = {}
                 outfit.typ = repair_type
                 outfit.faction = translate(ini_sys:r_string_ex(section, "community"), "st_data_export_unknown", "faction for " .. section)
@@ -554,31 +573,21 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
 
                 tbl[repair_type][section] = outfit
                 alife_release(se_obj)
-                x:SendOutput("export outfit - %s, done", section)
+                send_log(x, "export outfit - %s, done", section)
                 counter = counter - 1
                 leftovers[section] = nil
                 icon_candidates[section] = true
                 return true
-            end)
+            end, section, id)
         end
     end)
 
-    local function createTotalInterval(callback)
-        CreateTimeEvent("export_outfits_total", "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_outfits_total_", 5, function()
         if counter > 0 then
-            x:SendOutput("export outfit - %s outfits still to do", counter)
+            send_log(x, "export outfit - %s outfits still to do", counter)
             for section, _ in pairs(leftovers) do
                 if section then
-                    x:SendOutput("export outfit - %s still to do", section)
+                    send_log(x, "export outfit - %s still to do", section)
                 end
             end
             return false
@@ -590,7 +599,7 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
+                send_log(x, "Failed to create/open file %s", p_file)
                 debug_file:close()
                 return true
             end
@@ -619,10 +628,10 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
                 end
             end
             debug_file:close()
-            x:SendOutput("[END] export outfit - %s outfits exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export outfit - %s outfits exported - see %s", type_cnt, p_file)
         end
 
-        x:SendOutput("[END] export outfit - %s total outfits exported", cnt)
+        send_log(x, "[END] export outfit - %s total outfits exported", cnt)
         return true
     end)
 end
@@ -753,7 +762,7 @@ function getEatableAlcohol(section)
 end
 
 function debug_cmd_list.cmd.export_eatable(_, txt, x)
-    x:SendOutput("[START] export eatable")
+    send_log(x, "[START] export eatable")
 
     local food_kinds = {
         ["i_mutant_raw"] = true,
@@ -789,7 +798,7 @@ function debug_cmd_list.cmd.export_eatable(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and food_kinds[kind] then
-            x:SendOutput("export eatable - %s", section)
+            send_log(x, "export eatable - %s", section)
             local eatable = {}
             eatable.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             eatable.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -846,7 +855,7 @@ function debug_cmd_list.cmd.export_eatable(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export outfit - %s total eatable exported", cnt)
+    send_log(x, "[END] export outfit - %s total eatable exported", cnt)
 end
 
 function build_bhs_summary(t_name, sec)
@@ -942,7 +951,7 @@ function export_artefacts_recipes()
 end
 
 function debug_cmd_list.cmd.export_medicine(_, txt, x)
-    x:SendOutput("[START] export medicine")
+    send_log(x, "[START] export medicine")
 
     local food_kinds = {
         ["i_medical"] = true,
@@ -976,7 +985,7 @@ function debug_cmd_list.cmd.export_medicine(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and food_kinds[kind] then
-            x:SendOutput("export medicine - %s", section)
+            send_log(x, "export medicine - %s", section)
             local eatable = {}
             eatable.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             eatable.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1048,7 +1057,7 @@ function debug_cmd_list.cmd.export_medicine(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export medicine - %s total medicine exported", cnt)
+    send_log(x, "[END] export medicine - %s total medicine exported", cnt)
 end
 
 function get_perk_artifacts_list()
@@ -1096,7 +1105,7 @@ function get_perk_description(section, perk_key)
 end
 
 function debug_cmd_list.cmd.export_artefacts(_, txt, x)
-    x:SendOutput("[START] export artefacts")
+    send_log(x, "[START] export artefacts")
 
     local artefacts_kinds = {
         ["i_arty"] = true,
@@ -1134,7 +1143,7 @@ function debug_cmd_list.cmd.export_artefacts(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and artefacts_kinds[kind] then
-            x:SendOutput("export artefact - %s", section)
+            send_log(x, "export artefact - %s", section)
             local artefact = {}
             artefact.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             artefact.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1200,7 +1209,7 @@ function debug_cmd_list.cmd.export_artefacts(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export artefacts - %s total artefacts exported", cnt)
+    send_log(x, "[END] export artefacts - %s total artefacts exported", cnt)
 end
 
 -- Craft category index to filename suffix mapping
@@ -1217,7 +1226,7 @@ local craft_category_files = {
 }
 
 function debug_cmd_list.cmd.export_craft_recipes(_, txt, x)
-    x:SendOutput("[START] export craft recipes")
+    send_log(x, "[START] export craft recipes")
 
     local ini = itms_manager.ini_craft
     local ind = 1
@@ -1273,16 +1282,16 @@ function debug_cmd_list.cmd.export_craft_recipes(_, txt, x)
         end
         debug_file:close()
 
-        x:SendOutput("[PROGRESS] export craft recipes - category %s (%s) - %s recipes - see in Gamma\\Overwrite\\bin\\%s", ind, suffix, cnt, p_file)
+        send_log(x, "[PROGRESS] export craft recipes - category %s (%s) - %s recipes - see in Gamma\\Overwrite\\bin\\%s", ind, suffix, cnt, p_file)
         total_cnt = total_cnt + cnt
         ind = ind + 1
     end
 
-    x:SendOutput("[END] export craft recipes - %s total recipes exported across %s categories", total_cnt, ind - 1)
+    send_log(x, "[END] export craft recipes - %s total recipes exported across %s categories", total_cnt, ind - 1)
 end
 
 function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
-    x:SendOutput("[START] export belt attachments")
+    send_log(x, "[START] export belt attachments")
 
     local artefacts_kinds = {
         ["i_mutant_belt"] = true,
@@ -1311,7 +1320,7 @@ function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and artefacts_kinds[kind] or whitelist[section] then
-            x:SendOutput("export belt attachment - %s", section)
+            send_log(x, "export belt attachment - %s", section)
             local belt_attachment = {}
             belt_attachment.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             belt_attachment.cost = ini_sys:r_float_ex(section, "cost") or 0
@@ -1360,7 +1369,7 @@ function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export belt attachments - %s total attachments exported", cnt)
+    send_log(x, "[END] export belt attachments - %s total attachments exported", cnt)
 end
 
 local blacklist_ammo = {
@@ -1495,7 +1504,7 @@ function is_weapon_modification(section)
 end
 
 function debug_cmd_list.cmd.export_weapons(_, txt, x)
-    x:SendOutput("[START] export weapons")
+    send_log(x, "[START] export weapons")
 
     local blacklist = {
         ["wpn_colt_kimber"] = true,
@@ -1548,7 +1557,7 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
 
     local function process_queue(idx, itr)
         if idx > #sections_queue then
-            x:SendOutput("[END] export weapons - %s total exported", cnt)
+            send_log(x, "[END] export weapons - %s total exported", cnt)
             return true
         end
         local section = sections_queue[idx]
@@ -1636,7 +1645,7 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
             tbl[kind][section] = weapon
             icon_candidates[section] = true
             alife_release(se_obj)
-            x:SendOutput("export weapon - %s, done", section)
+            send_log(x, "export weapon - %s, done", section)
             leftToProcess = leftToProcess - 1
             item_id = nil
             process_queue(idx + 1, 0)
@@ -1648,19 +1657,9 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
     -- Start processing the queue
     process_queue(1, 0)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_weapons_total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_weapons_total_", 5, function()
         if leftToProcess > 0 then
-            x:SendOutput("export weapons - %s weapons still to do", leftToProcess)
+            send_log(x, "export weapons - %s weapons still to do", leftToProcess)
             return false
         end
 
@@ -1670,7 +1669,7 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
+                send_log(x, "Failed to create/open file %s", p_file)
                 debug_file:close()
                 return true
             end
@@ -1686,12 +1685,12 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
                 type_cnt = type_cnt + 1
             end
             debug_file:close()
-            x:SendOutput("[END] export weapons - %s weapons exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export weapons - %s weapons exported - see %s", type_cnt, p_file)
         end
 
-        x:SendOutput("[END] export weapons - %s total weapons exported", cnt)
+        send_log(x, "[END] export weapons - %s total weapons exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function get_heavy_attack_damage(obj, sec)
@@ -1735,7 +1734,7 @@ function prop_damage(obj, sec, name)
 end
 
 function debug_cmd_list.cmd.export_melee(_, txt, x)
-    x:SendOutput("[START] export melee")
+    send_log(x, "[START] export melee")
 
     local weapon_kinds = {
         ["w_melee"] = "melee",
@@ -1772,32 +1771,22 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
 
             if not se_obj then
                 printf("No server object made for [%s]", section)
-                --x:SendOutput( "No server object made for [%s]", section)
+                --send_log(x,  "No server object made for [%s]", section)
                 return
             end
             cnt = cnt + 1
             counter = counter + 1
             local id = se_obj.id
 
-            x:SendOutput("export melee - %s, start", section)
-            local function createInterval(section, id, callback, idx)
-                CreateTimeEvent("export_melee_" .. section .. "_" .. idx, "delay_func", 2, function(section, id)
-                    local success = callback(section, id)
-                    if not success then
-                        createInterval(section, id, callback, idx + 1)
-                    end
-                    return true
-                end, section, id)
-            end
-
-            createInterval(section, id, function(section, id)
+            send_log(x, "export melee - %s, start", section)
+            retry_event("export_melee_" .. section .. "_", 2, function(section, id)
                 local obj = level.object_by_id(id)
                 if not obj then
-                    --x:SendOutput("export weapon - %s, still online", section)
+                    --send_log(x, "export weapon - %s, still online", section)
                     return false
                 end
 
-                --x:SendOutput("export weapon - %s, back offline", section)
+                --send_log(x, "export weapon - %s, back offline", section)
                 local weapon = {}
                 weapon.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
                 weapon.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1815,26 +1804,16 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 tbl[kind][section] = weapon
                 icon_candidates[section] = true
                 alife_release(se_obj)
-                x:SendOutput("export melee - %s, done", section)
+                send_log(x, "export melee - %s, done", section)
                 counter = counter - 1
                 return true
-            end, 0)
+            end, section, id)
         end
     end)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_melee_total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_melee_total_", 5, function()
         if counter > 0 then
-            x:SendOutput("export melee - %s weapons still to do", counter)
+            send_log(x, "export melee - %s weapons still to do", counter)
             return false
         end
 
@@ -1844,7 +1823,7 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
+                send_log(x, "Failed to create/open file %s", p_file)
                 debug_file:close()
                 return true
             end
@@ -1860,11 +1839,11 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 type_cnt = type_cnt + 1
             end
             debug_file:close()
-            x:SendOutput("[END] export melee - %s melee exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export melee - %s melee exported - see %s", type_cnt, p_file)
         end
-        x:SendOutput("[END] export melee - %s total melee exported", cnt)
+        send_log(x, "[END] export melee - %s total melee exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function is_multiplayer_item(section)
@@ -1873,7 +1852,7 @@ function is_multiplayer_item(section)
 end
 
 function debug_cmd_list.cmd.export_explosives(_, txt, x)
-    x:SendOutput("[START] export explosives")
+    send_log(x, "[START] export explosives")
 
     local mines = {}
     for mine, id in pairs(txr_mines.FX_BY_SECTION) do
@@ -1919,7 +1898,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
             if explosive.cost == 0 then
                 return
             end
-            x:SendOutput("export explosive - %s", section)
+            send_log(x, "export explosive - %s", section)
             explosive.weight = floor_with_precision(ini_sys:r_float_ex(section, "inv_weight") or 0)
             local explosive_section = nil
             if rocket_class then
@@ -1931,7 +1910,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
             elseif kind and kind == "w_explosive" then
                 explosive_section = section
             else
-                x:SendOutput("export explosive - %s, no explosive section found", section)
+                send_log(x, "export explosive - %s, no explosive section found", section)
                 return
             end
             explosive.blast_power = ini_sys:r_float_ex(explosive_section, "blast") or 0
@@ -1960,7 +1939,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export explosives - %s total explosives exported", cnt)
+    send_log(x, "[END] export explosives - %s total explosives exported", cnt)
 end
 
 --local difficulty_scaling = ballistics_mcm and ballistics_mcm.get_config("difficulty_scaling") or false
@@ -2033,7 +2012,7 @@ function sanitize_value(name)
 end
 
 function debug_cmd_list.cmd.export_ammo(_, txt, x)
-    x:SendOutput("[START] export ammo")
+    send_log(x, "[START] export ammo")
 
     local tbl = {}
     local cnt = 0
@@ -2045,12 +2024,12 @@ function debug_cmd_list.cmd.export_ammo(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind == "w_ammo" then
-            x:SendOutput("export ammo - %s", section)
+            send_log(x, "export ammo - %s", section)
             local ammo = {}
             ammo.name = sanitize_ammo_name(translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section))
             ammo.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
             ammo.cost = ini_sys:r_float_ex(section, "cost") or 0
-            ammo.box_size = round(ini_sys:r_float_ex(section, "box_size"))
+            ammo.box_size = round(ini_sys:r_float_ex(section, "box_size") or 0)
             ammo.weight = floor_with_precision(ini_sys:r_float_ex(section, "inv_weight") or 0)
             ammo.projectiles = ini_sys:r_float_ex(section, "buck_shot") or 1
             ammo.damage = ini_sys:r_float_ex(section, "k_hit") or 0
@@ -2084,11 +2063,11 @@ function debug_cmd_list.cmd.export_ammo(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export ammo - %s total ammo exported", cnt)
+    send_log(x, "[END] export ammo - %s total ammo exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
-    x:SendOutput("[START] export disassemble table")
+    send_log(x, "[START] export disassemble table")
 
     local blacklist = {
         ["ammo"] = true,
@@ -2114,7 +2093,7 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
             return
         end
         local parts_tbl = str_explode(partsRaw, ",")
-        x:SendOutput("export disassemble item - %s", section)
+        send_log(x, "export disassemble item - %s", section)
 
         local disassemble = {}
         local item_name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
@@ -2178,7 +2157,7 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
     end
     disassembles_file:close()
 
-    x:SendOutput("[PROGRESS-1] export disassemble - %s total disassembles exported - see in Gamma\\Overwrite\\bin\\export_disassemble_table.csv", disassemble_count)
+    send_log(x, "[PROGRESS-1] export disassemble - %s total disassembles exported - see in Gamma\\Overwrite\\bin\\export_disassemble_table.csv", disassemble_count)
 
     local materials_file_name = "export_disassembles_materials.csv"
     local materials_file = file_for_write(materials_file_name)
@@ -2200,11 +2179,11 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
         write_csv(materials_file, unpack(parts))
     end
 
-    x:SendOutput("[END] export materials - %s total materials exported", materials_count)
+    send_log(x, "[END] export materials - %s total materials exported", materials_count)
 end
 
 function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
-    x:SendOutput("[START] export outfit exchange")
+    send_log(x, "[START] export outfit exchange")
 
     local outfit_map = {}
     for variable, value in pairs(grok_armor_convert) do
@@ -2287,11 +2266,11 @@ function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
     end
     file:close()
 
-    x:SendOutput("[END] outfit exchange - %s total exchanges exported", cnt)
+    send_log(x, "[END] outfit exchange - %s total exchanges exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
-    x:SendOutput("[START] export mutant parts prices")
+    send_log(x, "[START] export mutant parts prices")
 
     local fake_butcher
     local fake_sakharov
@@ -2314,12 +2293,12 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
     end
 
     if not fake_butcher then
-        x:SendOutput("Unable to find any NPCs on level for faking Butcher")
+        send_log(x, "Unable to find any NPCs on level for faking Butcher")
         return
     end
 
     if not fake_sakharov then
-        x:SendOutput("Unable to find any NPCs on level for faking Sakharov")
+        send_log(x, "Unable to find any NPCs on level for faking Sakharov")
         return
     end
 
@@ -2365,34 +2344,24 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
 
         if not se_obj then
             printf("No server object made for [%s]", section)
-            x:SendOutput("No server object made for [%s]", section)
+            send_log(x, "No server object made for [%s]", section)
             return
         end
         cnt = cnt + 1
         processing_counter = processing_counter + 1
         local id = se_obj.id
 
-        x:SendOutput("export mutant part price - %s, start", section)
-        local function createInterval(section, id, callback, idx)
-            CreateTimeEvent("export_mutant_part_price_" .. section .. "_" .. idx, "delay_func", 2, function(section, id)
-                local success = callback(section, id)
-                if not success then
-                    createInterval(section, id, callback, idx + 1)
-                end
-                return true
-            end, section, id)
-        end
-
-        createInterval(section, id, function(section, id)
+        send_log(x, "export mutant part price - %s, start", section)
+        retry_event("export_mutant_part_price_" .. section .. "_", 2, function(section, id)
             local obj = level.object_by_id(id)
             if not obj then
-                x:SendOutput("export part - %s, still online", section)
+                send_log(x, "export part - %s, still online", section)
                 return false
             end
             if not obj.section then
-                x:SendOutput("export mutant part price - %s, failed", section)
+                send_log(x, "export mutant part price - %s, failed", section)
                 processing_counter = processing_counter - 1
-                --x:SendOutput("export weapon - %s, still online", section)
+                --send_log(x, "export weapon - %s, still online", section)
                 alife_release(se_obj)
                 return true
             end
@@ -2406,25 +2375,15 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
 
             parts[section] = part
             alife_release(se_obj)
-            x:SendOutput("export mutant part price - %s, done", section)
+            send_log(x, "export mutant part price - %s, done", section)
             processing_counter = processing_counter - 1
             return true
-        end, 0)
+        end, section, id)
     end)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_mutant_part_price__total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_mutant_part_price__total_", 5, function()
         if processing_counter > 0 then
-            x:SendOutput("export mutant parts prices - %s parts still to do", processing_counter)
+            send_log(x, "export mutant parts prices - %s parts still to do", processing_counter)
             return false
         end
 
@@ -2432,7 +2391,7 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
         local file = file_for_write(p_file)
 
         if (file == nil) then
-            x:SendOutput("Failed to create/open file %s", p_file)
+            send_log(x, "Failed to create/open file %s", p_file)
             return true
         end
 
@@ -2451,13 +2410,13 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
                     section, part.name, part.sakharov_price, part.butcher_price)
         end
         file:close()
-        x:SendOutput("[END] mutant parts prices - %s total parts exported", cnt)
+        send_log(x, "[END] mutant parts prices - %s total parts exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function debug_cmd_list.cmd.export_mutant_profiles(_, txt, x)
-    x:SendOutput("[START] export mutant profiles")
+    send_log(x, "[START] export mutant profiles")
 
     local function read_bone_mult(damage_sect, bone)
         local raw = ini_sys:r_string_ex(damage_sect, bone)
@@ -2528,7 +2487,7 @@ function debug_cmd_list.cmd.export_mutant_profiles(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export mutant profiles - %s profiles written - see %s", cnt, p_file)
+    send_log(x, "[END] export mutant profiles - %s profiles written - see %s", cnt, p_file)
 end
 
 function get_weapon_kind(kind)
@@ -2540,7 +2499,7 @@ function get_weapon_kind(kind)
 end
 
 function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
-    x:SendOutput("[START] export weapon drop sources")
+    send_log(x, "[START] export weapon drop sources")
 
     local skip_sections = {
         ['skip_npcs'] = true,
@@ -2678,12 +2637,12 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
 
     file:close()
 
-    x:SendOutput("[END] weapon drop sources - %s total guns exported", cnt)
+    send_log(x, "[END] weapon drop sources - %s total guns exported", cnt)
 end
 
 
 function debug_cmd_list.cmd.export_item_list(_, txt, x)
-    x:SendOutput("[START] export items list")
+    send_log(x, "[START] export items list")
 
     -- Load buy_sell ini file for loot check
     local buy_sell_ini = ini_file("items\\trade\\gulag_job_trade_buy_sell.ltx")
@@ -2741,11 +2700,11 @@ function debug_cmd_list.cmd.export_item_list(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export items - %s total items exported", cnt)
+    send_log(x, "[END] export items - %s total items exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_items_common_data(_, txt, x)
-    x:SendOutput("[START] export items common data")
+    send_log(x, "[START] export items common data")
 
     local tbl = {}
     local cnt = 0
@@ -2783,11 +2742,11 @@ function debug_cmd_list.cmd.export_items_common_data(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export items common data - %s items exported", cnt)
+    send_log(x, "[END] export items common data - %s items exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
-    x:SendOutput("[START] export stash drop rates")
+    send_log(x, "[START] export stash drop rates")
 
     local use_item_names = true  -- set to true to output display names instead of section IDs
 
@@ -2939,11 +2898,11 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export stash drop rates - %s map rows written", row_count)
+    send_log(x, "[END] export stash drop rates - %s map rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
-    x:SendOutput("[START] export toolkit map rates")
+    send_log(x, "[START] export toolkit map rates")
 
     -- Toolkit probability per tier (steady-state: all prerequisite kits already found)
     local toolkit_probs = {
@@ -3013,11 +2972,11 @@ function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export toolkit map rates - %s map rows written", row_count)
+    send_log(x, "[END] export toolkit map rates - %s map rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_upgrades(_, txt, x)
-    x:SendOutput("[START] export upgrades")
+    send_log(x, "[START] export upgrades")
 
     -- ── Pass 1: collect all items with upgrades ──────────────────────────
     local all_items = {}  -- section -> { name, upgrades[] }
@@ -3141,7 +3100,7 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
         item_count = item_count + 1
     end
     f1:close()
-    x:SendOutput("export upgrades - %s items written", item_count)
+    send_log(x, "export upgrades - %s items written", item_count)
 
     -- ── Pass 3: determine max property count for File 2 column width ─────
     local max_props = 0
@@ -3284,11 +3243,11 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
         printf(stat)
     end
 
-    x:SendOutput("[END] export upgrades - %s items, %s upgrade sections", item_count, sec_count)
+    send_log(x, "[END] export upgrades - %s items, %s upgrade sections", item_count, sec_count)
 end
 
 function debug_cmd_list.cmd.export_item_icons(_, txt, x)
-    x:SendOutput("[START] export item icons")
+    send_log(x, "[START] export item icons")
 
     local blacklist = {
         ["weapon_ammo_parts"] = true, -- not an item
@@ -3331,11 +3290,11 @@ function debug_cmd_list.cmd.export_item_icons(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export item icons - %s sections written", cnt)
+    send_log(x, "[END] export item icons - %s sections written", cnt)
 end
 
 function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
-    x:SendOutput("[START] export stash drop rates by item")
+    send_log(x, "[START] export stash drop rates by item")
 
     -- Load config files
     local ini_tm   = treasure_manager.ini_treasure
@@ -3483,11 +3442,11 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export stash drop rates by item - %s rows written", row_count)
+    send_log(x, "[END] export stash drop rates by item - %s rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_npc_armor_profiles(_, txt, x)
-    x:SendOutput("[START] export NPC armor profiles")
+    send_log(x, "[START] export NPC armor profiles")
 
     local ini_bp = grok_bo.ini_bones
     local ini_capture = grok_bo.ini_capture
@@ -3572,11 +3531,11 @@ function debug_cmd_list.cmd.export_npc_armor_profiles(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export NPC armor profiles - %s profiles written", cnt)
+    send_log(x, "[END] export NPC armor profiles - %s profiles written", cnt)
 end
 
 function debug_cmd_list.cmd.export_weapon_addons(_, txt, x)
-    x:SendOutput("[START] export addons")
+    send_log(x, "[START] export addons")
 
     local seen_scopes    = {}
     local seen_silencers = {}
@@ -3641,11 +3600,11 @@ function debug_cmd_list.cmd.export_weapon_addons(_, txt, x)
     local silen_cnt = write_addon_file("export_silencers.csv", seen_silencers, false)
     local gl_cnt    = write_addon_file("export_grenade_launchers.csv", seen_gls, false)
 
-    x:SendOutput("[END] export addons - %s scopes, %s silencers, %s grenade launchers", scope_cnt, silen_cnt, gl_cnt)
+    send_log(x, "[END] export addons - %s scopes, %s silencers, %s grenade launchers", scope_cnt, silen_cnt, gl_cnt)
 end
 
 function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
-    x:SendOutput("[START] export weapon addon map")
+    send_log(x, "[START] export weapon addon map")
 
     local f = file_for_write("export_weapon_addon_map.csv")
     local cnt = 0
@@ -3711,7 +3670,7 @@ function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
     end
     fr:close()
 
-    x:SendOutput("[END] export weapon addon map - %s weapons, %s addons written", cnt, #sorted_keys)
+    send_log(x, "[END] export weapon addon map - %s weapons, %s addons written", cnt, #sorted_keys)
 end
 
 -- Set of character IDs (from npc_profile*.xml) that have no matching <class> in character_desc files.
@@ -3817,7 +3776,7 @@ local traders = {
 }
 
 function debug_cmd_list.cmd.export_traders(_, txt, x)
-    x:SendOutput("[START] export traders")
+    send_log(x, "[START] export traders")
 
     local kind_t = {
         i_arty_junk = true, i_arty = true, i_food = true, i_drink = true, i_misc = true,
@@ -4027,7 +3986,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
     for _, trader in ipairs(traders) do
         local ini = ini_file(trader.config)
         if not ini then
-            x:SendOutput("export traders - SKIPPED %s (file not found)", trader.section)
+            send_log(x, "export traders - SKIPPED %s (file not found)", trader.section)
         else
             local base = "traders\\" .. trader.section .. "\\"
 
@@ -4047,7 +4006,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         end
     end
 
-    x:SendOutput("[END] export traders - %s traders exported", total)
+    send_log(x, "[END] export traders - %s traders exported", total)
 end
 
 function clear_stalkers()
@@ -4055,7 +4014,7 @@ function clear_stalkers()
 end
 
 function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
-    x:SendOutput("[START] export traders mapping")
+    send_log(x, "[START] export traders mapping")
 
     local smart_location_prefix = {
         ["agr"] = "agroprom",
@@ -4103,7 +4062,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
     -- Step 1: Load squad_descr and build smart_name -> { {story_id, npc} } map
     local squad_ini = ini_file("misc\\squad_descr\\squad_descr.ltx")
     if not squad_ini then
-        x:SendOutput("export traders mapping - ERROR: squad_descr.ltx not found")
+        send_log(x, "export traders mapping - ERROR: squad_descr.ltx not found")
         return
     end
 
@@ -4264,7 +4223,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
             write_csv(f, unpack(row))
         end
         f:close()
-        x:SendOutput("[END] export traders mapping - %s trader sections mapped", #sorted)
+        send_log(x, "[END] export traders mapping - %s trader sections mapped", #sorted)
     end
 
     if #pending == 0 then
