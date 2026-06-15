@@ -2589,8 +2589,12 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
             part = {}
             part.type = type
             part.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
-            part.sakharov_price = math.floor(utils_item.get_item_cost(obj, sakharov_profile))
-            part.butcher_price = math.floor(utils_item.get_item_cost(obj, butcher_profile))
+            -- utils_item.get_item_cost can return false (not a number) when an item
+            -- isn't priceable against a trader's profile on some modpacks; math.floor
+            -- on a boolean CTDs. `or 0` collapses false/nil to 0 ("no price").
+            -- NB: do NOT use type() here -- `type` is shadowed by a local number above.
+            part.sakharov_price = math.floor(utils_item.get_item_cost(obj, sakharov_profile) or 0)
+            part.butcher_price = math.floor(utils_item.get_item_cost(obj, butcher_profile) or 0)
 
             parts[section] = part
             alife_release(se_obj)
@@ -2740,7 +2744,6 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
         if skip_sections[section] then
             return
         end
-
         if not drop_ini:line_exist(section, "primary") then
             return
         end
