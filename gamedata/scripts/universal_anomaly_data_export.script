@@ -58,6 +58,18 @@ function file_for_read(name, folder)
     return file(name, "r", folder or init_folder)
 end
 
+-- ini:line_count(section) hard-CRASHES (CInifile::r_section assert) if the section
+-- doesn't exist -- and `or 0` can't catch it, the assert throws first. The exporter
+-- assumes GAMMA's ini layout (craft category numbers, treasure sections, etc.);
+-- other modpacks differ. Use this for any line_count over a section that might be
+-- absent: returns 0 (loops just don't run) instead of CTD'ing.
+function safe_line_count(ini, section)
+    if ini and section and ini:section_exist(section) then
+        return ini:line_count(section) or 0
+    end
+    return 0
+end
+
 function debug_cmd_list.cmd.export_all(_, txt, x)
     local skip = {
         ["export_translations"] = true,
@@ -882,7 +894,7 @@ function getEatablesUsedInCooking()
     local used_in_cooking = {}
     local from_cooking = {}
     local cooking_ini = ini_file("items\\settings\\cook.ltx")
-    n = cooking_ini:line_count("meal_list")
+    n = safe_line_count(cooking_ini, "meal_list")
     for i = 0, n - 1 do
         result, id, value = cooking_ini:r_line_ex("meal_list", i, "", "")
         if id and value then
@@ -1039,7 +1051,7 @@ function export_recipes(craft_index)
 
     local ini = itms_manager.ini_craft
     local ind_str = tostring(craft_index)
-    local n = ini:line_count(ind_str) or 0
+    local n = safe_line_count(ini, ind_str)
     for i = 0, n - 1 do
         local result, id, value = ini:r_line(ind_str, i, "", "")
         id = string.sub(id, 3)
@@ -1994,8 +2006,10 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 weapon.max_range = get_weapon_stat_value(obj, section, "max_range")
                 local ammo = ini_sys:r_string_ex(section, "ammo_class")
                 weapon.br = (ammo and ini_sys:r_float_ex(ammo, "k_ap") or 0) * 10 * 100 * get_game_difficulty_multiplier()
-                weapon.pelts_quality_min = zz_item_artefact.knifesm[section] and to_percent_string(zz_item_artefact.knifesm[section].min) or ""
-                weapon.pelts_quality_max = zz_item_artefact.knifesm[section] and to_percent_string(zz_item_artefact.knifesm[section].max) or ""
+                -- zz_item_artefact is an optional GAMMA mod; absent on plain Anomaly.
+                local knifesm = zz_item_artefact and zz_item_artefact.knifesm and zz_item_artefact.knifesm[section]
+                weapon.pelts_quality_min = knifesm and to_percent_string(knifesm.min) or ""
+                weapon.pelts_quality_max = knifesm and to_percent_string(knifesm.max) or ""
                 weapon.cuts_thick_skin = (section:match('wpn_knife$') or section:match('wpn_knife2$') or not string.find(section, "knife")) and "N" or "Y"
                 weapon.light_attack_power = prop_damage(obj, section, "hit_power")
                 weapon.heavy_attack_power = prop_damage(obj, section, "hit_power_2")
@@ -2384,6 +2398,12 @@ end
 function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
     send_log(x, "[START] export outfit exchange")
 
+    -- grok_armor_convert is an optional GAMMA mod (armor exchange); absent elsewhere.
+    if not grok_armor_convert then
+        send_log(x, "[SKIP] export outfit exchange - grok armor convert (GAMMA) not present")
+        return
+    end
+
     local outfit_map = {}
     for variable, value in pairs(grok_armor_convert) do
         if not string.find(variable, "all_") then
@@ -2725,7 +2745,7 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
             return
         end
 
-        local n = drop_ini:line_count(section) or 0
+        local n = safe_line_count(drop_ini, section)
         local id, value, drop_section, m, tmp, gun_section, faction, rank, tmpfk
         if (n > 0) then
             for i = 0, n - 1 do
@@ -2748,7 +2768,7 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
                 end
                 printf("section %s, faction %s, rank %s", section, faction, rank)
 
-                m = drop_ini:line_count(drop_section) or 0
+                m = safe_line_count(drop_ini, drop_section)
                 for j = 0, m - 1 do
                     _, id, value = drop_ini:r_line_ex(drop_section, j, "", "")
                     tmp = str_explode(id, ":")
@@ -2947,6 +2967,12 @@ end
 function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     send_log(x, "[START] export stash drop rates")
 
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.ini_treasure and treasure_manager.map_tiers) then
+        send_log(x, "[SKIP] export stash drop rates - GAMMA treasure data not present")
+        return
+    end
+
     local use_item_names = true  -- set to true to output display names instead of section IDs
 
     -- Load config files
@@ -2963,7 +2989,7 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     local num_tiers = 5
 
     for stash_type, ltx_section in pairs(stash_sections) do
-        local n = ini_tm:line_count(ltx_section)
+        local n = safe_line_count(ini_tm, ltx_section)
         for i = 0, n - 1 do
             local _, kind, value = ini_tm:r_line(ltx_section, i, "", "")
             if kind and value and kind ~= "" and value ~= "" then
@@ -2987,7 +3013,7 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     -- Parse possible_items: build section -> {kind, tier, allowed_ecos}
     local all_ecos = { 1, 2, 3 }
     local items = {}
-    local n = ini_tm:line_count("possible_items")
+    local n = safe_line_count(ini_tm, "possible_items")
     for i = 0, n - 1 do
         local _, section, value = ini_tm:r_line("possible_items", i, "", "")
         if section and section ~= "" then
@@ -3102,6 +3128,12 @@ end
 
 function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
     send_log(x, "[START] export toolkit map rates")
+
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.tools_map_tiers) then
+        send_log(x, "[SKIP] export toolkit map rates - GAMMA treasure data not present")
+        return
+    end
 
     -- Toolkit probability per tier (steady-state: all prerequisite kits already found)
     local toolkit_probs = {
@@ -3305,7 +3337,7 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
     local max_props = 0
     for _, sections in pairs(all_stats_sections) do
         for stats_sec in pairs(sections) do
-            local n = ini_sys:line_count(stats_sec)
+            local n = safe_line_count(ini_sys, stats_sec)
             if n and n > max_props then max_props = n end
         end
     end
@@ -3336,7 +3368,7 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
     for _, entry in ipairs(sorted_stats) do
         local stat_type = entry.stat_type
         local stats_sec = entry.stats_sec
-        local n = ini_sys:line_count(stats_sec) or 0
+        local n = safe_line_count(ini_sys, stats_sec)
         local props_written = 0
         local parts = {stats_sec, stat_type}
 
@@ -3495,6 +3527,12 @@ end
 function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     send_log(x, "[START] export stash drop rates by item")
 
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.ini_treasure and treasure_manager.map_tiers) then
+        send_log(x, "[SKIP] export stash drop rates by item - GAMMA treasure data not present")
+        return
+    end
+
     -- Load config files
     local ini_tm   = treasure_manager.ini_treasure
     local ini_tier = treasure_manager.ini_tiers
@@ -3509,7 +3547,7 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     local num_tiers = 5
 
     for stash_type, ltx_section in pairs(stash_sections) do
-        local n = ini_tm:line_count(ltx_section)
+        local n = safe_line_count(ini_tm, ltx_section)
         for i = 0, n - 1 do
             local _, kind, value = ini_tm:r_line(ltx_section, i, "", "")
             if kind and value and kind ~= "" and value ~= "" then
@@ -3528,7 +3566,7 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     -- Parse possible_items: build section -> {kind, tier, allowed_ecos, name}
     local all_ecos = { 1, 2, 3 }
     local items = {}
-    local n = ini_tm:line_count("possible_items")
+    local n = safe_line_count(ini_tm, "possible_items")
     for i = 0, n - 1 do
         local _, section, value = ini_tm:r_line("possible_items", i, "", "")
         if section and section ~= "" then
@@ -4025,7 +4063,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         local discounts = {}
         local no_value_items = {}
         for _, cond_section in ipairs(ordered) do
-            local n = ini:line_count(cond_section) or 0
+            local n = safe_line_count(ini, cond_section)
             for i = 0, n - 1 do
                 local _, item_id, mult_str = ini:r_line(cond_section, i, "", "")
                 if item_id and item_id ~= "" and (not mult_str or mult_str == "") then
@@ -4068,7 +4106,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         local discounts = {}
         local no_value_items = {}
         for _, cond_section in ipairs(ordered) do
-            local n = ini:line_count(cond_section) or 0
+            local n = safe_line_count(ini, cond_section)
             for i = 0, n - 1 do
                 local _, item_id, mult_str = ini:r_line(cond_section, i, "", "")
                 if item_id and item_id ~= "" and (not mult_str or mult_str == "") then
@@ -4138,7 +4176,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
                 write_csv_header(f, translate_headers({
                     "~", "st_data_export_quantity", "st_data_export_probability"
                 }))
-                local n = ini:line_count(sup_section) or 0
+                local n = safe_line_count(ini, sup_section)
                 for i = 0, n - 1 do
                     local _, item_id, value = ini:r_line(sup_section, i, "", "")
                     translate_with_context(ini_sys:r_string_ex(item_id, "inv_name"), "item name for " .. item_id)
@@ -4161,7 +4199,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
             "st_data_export_discount_type", "st_data_export_discount_value"
         }))
         if discounts_sec and discounts_sec ~= "" then
-            local n = ini:line_count(discounts_sec) or 0
+            local n = safe_line_count(ini, discounts_sec)
             for i = 0, n - 1 do
                 local _, dtype, dvalue = ini:r_line(discounts_sec, i, "", "")
                 if dtype and dtype ~= "" then
@@ -4390,7 +4428,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
             local smart_ini = ini_file(path)
             printf("Processing ini %s", path)
             if smart_ini and smart_ini:section_exist("exclusive") then
-                local n = smart_ini:line_count("exclusive") or 0
+                local n = safe_line_count(smart_ini, "exclusive")
                 local seen_paths = {}
                 for i = 0, n - 1 do
                     local _, _, logic_path = smart_ini:r_line("exclusive", i, "", "")
