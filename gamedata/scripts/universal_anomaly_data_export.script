@@ -20,6 +20,7 @@ local cmd_list = {
     { name = "Export item icons", cmd = "export_item_icons", hide_ui = 0 },
     { name = "Export item drop locations", cmd = "export_item_drop_locations", hide_ui = 0 },
     { name = "Export disassemble table", cmd = "export_disassemble_table", hide_ui = 0 },
+    { name = "Export weapon parts", cmd = "export_weapon_parts", hide_ui = 0 },
     { name = "Export outfit exchange table", cmd = "export_outfit_exchange", hide_ui = 0 },
     { name = "Export mutant parts prices", cmd = "export_mutant_parts_prices", hide_ui = 0 },
     { name = "Export mutant profiles", cmd = "export_mutant_profiles", hide_ui = 0 },
@@ -2393,6 +2394,93 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
     end
 
     send_log(x, "[END] export materials - %s total materials exported", materials_count)
+end
+
+-- Export each weapon's component parts (Weapon Parts Overhaul). The salvage disassembly
+-- above reads [nor_parts_list]; a weapon's physical components instead live in
+-- [con_parts_list] of items\settings\parts.ltx -- the same ini already loaded as
+-- itms_manager.ini_parts and read by the game via r_string_ex("con_parts_list", wpn).
+-- Each value is a flat, distinct list of prt_w_* sections (one of each, with NO
+-- repeat-count numbers), e.g. wpn_vz61 = prt_w_barrel_11, prt_w_trigger_components_2, ...
+--
+-- WPO / itms_manager are optional: on plain Anomaly or other modpacks ini_parts or the
+-- con_parts_list section may be absent, so guard and [SKIP] cleanly like the other
+-- optional-mod exporters rather than CTD'ing. Part sections often carry their inv_name
+-- only via inheritance, but ini_sys (the merged system ini) resolves that. We emit the
+-- part section id (it preserves the tier suffix -- several tiers share one display name)
+-- alongside the translated name.
+function debug_cmd_list.cmd.export_weapon_parts(_, txt, x)
+    send_log(x, "[START] export weapon parts")
+
+    local ini_parts = itms_manager and itms_manager.ini_parts
+    if not ini_parts then
+        send_log(x, "[SKIP] export weapon parts - itms_manager.ini_parts not available (Weapon Parts Overhaul not installed)")
+        return
+    end
+    if not ini_parts:section_exist("con_parts_list") then
+        send_log(x, "[SKIP] export weapon parts - con_parts_list section not found (Weapon Parts Overhaul not installed)")
+        return
+    end
+
+    local tbl = {}
+    local max_parts = 0
+    local cnt = 0
+    ini_sys:section_for_each(function(section)
+        local partsRaw = ini_parts:r_string_ex("con_parts_list", section)
+        if partsRaw == nil then
+            return
+        end
+
+        local row = { name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section), parts = {} }
+        for _, part in ipairs(str_explode(partsRaw, ",")) do
+            local part_section = part and part:trim() or ""
+            if part_section ~= "" and ini_sys:section_exist(part_section) then
+                local part_name = translate_with_context(ini_sys:r_string_ex(part_section, "inv_name"), "item name for " .. part_section)
+                row.parts[#row.parts + 1] = { id = part_section, name = part_name }
+                icon_candidates[part_section] = true
+            end
+        end
+
+        if #row.parts > 0 then
+            tbl[section] = row
+            icon_candidates[section] = true
+            cnt = cnt + 1
+            if #row.parts > max_parts then
+                max_parts = #row.parts
+            end
+            send_log(x, "export weapon parts - %s, %s parts", section, #row.parts)
+        end
+    end)
+
+    local p_file = "export_weapon_parts.csv"
+    local debug_file = file_for_write(p_file)
+    if debug_file == nil then
+        send_log(x, "Failed to create/open file %s", p_file)
+        return
+    end
+
+    -- Wide format mirroring the disassemble table: weapon id, weapon name, then a
+    -- (part section, part name) pair per component. Header is padded to the widest
+    -- weapon seen so every emitted column is labeled.
+    local header_cols = { "~", "pda_encyclopedia_name" }
+    for i = 1, math.max(max_parts, 1) do
+        header_cols[#header_cols + 1] = "st_data_export_part"
+        header_cols[#header_cols + 1] = "st_data_export_part_name"
+    end
+    write_csv_header(debug_file, translate_headers(header_cols))
+
+    for _, section in ipairs(sort_keys(tbl)) do
+        local row = tbl[section]
+        local cols = { section, row.name }
+        for _, part in ipairs(row.parts) do
+            cols[#cols + 1] = part.id
+            cols[#cols + 1] = part.name
+        end
+        write_csv(debug_file, unpack(cols))
+    end
+    debug_file:close()
+
+    send_log(x, "[END] export weapon parts - %s weapons exported - see %s", cnt, p_file)
 end
 
 function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
