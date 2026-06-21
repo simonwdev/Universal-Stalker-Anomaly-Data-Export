@@ -19,9 +19,16 @@ except ImportError:
 
 try:
     import mobase
-    from PyQt5.QtCore import QCoreApplication, QRect
-    from PyQt5.QtGui import QIcon, QImage, QImageReader
-    from PyQt5.QtWidgets import QMessageBox
+    try:
+        from PyQt6.QtCore import QCoreApplication, QRect
+        from PyQt6.QtGui import QIcon, QImage, QImageReader
+        from PyQt6.QtWidgets import QMessageBox
+        _QIMAGE_FORMAT_RGBA8888 = QImage.Format.Format_RGBA8888
+    except ImportError:
+        from PyQt5.QtCore import QCoreApplication, QRect
+        from PyQt5.QtGui import QIcon, QImage, QImageReader
+        from PyQt5.QtWidgets import QMessageBox
+        _QIMAGE_FORMAT_RGBA8888 = QImage.Format_RGBA8888
     _MO2_AVAILABLE = True
 except ImportError:
     _MO2_AVAILABLE = False
@@ -238,8 +245,51 @@ if _MO2_AVAILABLE:
         **{v: b"DXT5" for v in (76, 77, 78)},   # BC3 typeless/unorm/srgb
     }
 
+    def _decode_uncompressed_32bpp(data, width, height, rmask, gmask, bmask, amask, has_alpha):
+        """Convert raw 32bpp uncompressed DDS pixel data to a QImage (Format_RGBA8888).
+
+        X-Ray mod atlases that aren't DXT-compressed are almost always 32bpp
+        A8R8G8B8 (stored B,G,R,A little-endian). QImageReader frequently can't read
+        these, so decode by channel masks: fast slice-swaps for the two common
+        layouts, a generic per-pixel remap for anything unusual.
+        """
+        n = width * height
+        if len(data) < n * 4:
+            return None
+        buf = bytearray(data[: n * 4])
+        rgb = (rmask, gmask, bmask)
+        if rgb == (0x00FF0000, 0x0000FF00, 0x000000FF):
+            # stored B,G,R,A → swap R/B to produce R,G,B,A
+            buf[0::4], buf[2::4] = bytes(buf[2::4]), bytes(buf[0::4])
+        elif rgb == (0x000000FF, 0x0000FF00, 0x00FF0000):
+            pass  # already R,G,B,A
+        else:
+            def _shift(m):
+                s = 0
+                while m and not (m >> s) & 1:
+                    s += 1
+                return s
+            rs, gs, bs, as_ = _shift(rmask), _shift(gmask), _shift(bmask), _shift(amask)
+            src = bytes(buf)
+            out = bytearray(n * 4)
+            for i in range(n):
+                px = struct.unpack_from("<I", src, i * 4)[0]
+                o = i * 4
+                out[o]     = (px & rmask) >> rs
+                out[o + 1] = (px & gmask) >> gs
+                out[o + 2] = (px & bmask) >> bs
+                out[o + 3] = ((px & amask) >> as_) if amask else 255
+            buf = out
+        if not has_alpha or amask == 0:
+            buf[3::4] = b"\xff" * n
+        # QImage does not take ownership of the Python buffer; the temporary would
+        # be freed on return, leaving a dangling/unusable image. Hold the reference
+        # during construction and .copy() so Qt allocates and owns its own pixels.
+        raw = bytes(buf)
+        return QImage(raw, width, height, width * 4, _QIMAGE_FORMAT_RGBA8888).copy()
+
     def _load_dds_fallback(path: Path) -> Optional["QImage"]:
-        """Pure-Python DXT1/DXT3/DXT5 decoder — fallback when QImageReader can't handle the DDS variant."""
+        """Pure-Python decoder for DDS variants QImageReader can't handle: DXT1/3/5 and uncompressed 32bpp RGB(A)."""
         try:
             with path.open("rb") as f:
                 if f.read(4) != b"DDS ":
@@ -250,8 +300,21 @@ if _MO2_AVAILABLE:
                 pf_flags = struct.unpack_from("<I", hdr, 76)[0]
                 fourcc   = struct.unpack_from("4s", hdr, 80)[0]
 
-                if not (pf_flags & 0x4):
-                    return None
+                # Uncompressed RGB(A) DDS (no FourCC). Many mod atlases — including
+                # GAMMA Mags Reloaded's ui_icon_magazines.dds — ship as plain 32bpp
+                # B8G8R8A8 that QImageReader can't decode. Handle it directly.
+                if not (pf_flags & 0x4):                       # DDPF_FOURCC absent
+                    if not (pf_flags & 0x40):                  # DDPF_RGB required
+                        return None
+                    bpp = struct.unpack_from("<I", hdr, 84)[0]
+                    if bpp != 32:
+                        return None
+                    rmask, gmask, bmask, amask = struct.unpack_from("<IIII", hdr, 88)
+                    data = f.read(width * height * 4)
+                    return _decode_uncompressed_32bpp(
+                        data, width, height, rmask, gmask, bmask, amask,
+                        bool(pf_flags & 0x1),                  # DDPF_ALPHAPIXELS
+                    )
 
                 if fourcc == b"DX10":
                     dx10_hdr = f.read(20)
@@ -327,7 +390,10 @@ if _MO2_AVAILABLE:
                         pixels[pos+2] = b
                         pixels[pos+3] = alpha[i]
 
-            return QImage(bytes(pixels), width, height, width * 4, QImage.Format_RGBA8888)
+            # .copy() with a held reference: Qt owns the pixels, so the temporary
+            # buffer can be freed on return without dangling (see _decode_uncompressed_32bpp).
+            raw = bytes(pixels)
+            return QImage(raw, width, height, width * 4, _QIMAGE_FORMAT_RGBA8888).copy()
         except Exception:
             return None
 
@@ -352,7 +418,8 @@ if _MO2_AVAILABLE:
             return "Extracts weapon and outfit icons from STALKER Anomaly texture atlases."
 
         def version(self) -> mobase.VersionInfo:
-            return mobase.VersionInfo(1, 0, 0, mobase.ReleaseType.final)
+            release = getattr(mobase.ReleaseType, "FINAL", None) or getattr(mobase.ReleaseType, "final")
+            return mobase.VersionInfo(1, 0, 0, release)
 
         def isActive(self) -> bool:
             return True

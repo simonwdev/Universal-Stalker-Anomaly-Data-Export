@@ -1,6 +1,9 @@
 local cmd_list = {
     {name = "Change headers mode", cmd = "change_headers_mode", hide_ui = 0},
     { name = "Export outfits", cmd = "export_outfits", hide_ui = 0 },
+    { name = "Export mag capacity", cmd = "export_mag_capacity", hide_ui = 0 },
+    { name = "Export magazine info", cmd = "export_magazine_info", hide_ui = 0 },
+    { name = "Export weapon magazine map", cmd = "export_weapon_magazine_map", hide_ui = 0 },
     { name = "Export eatable", cmd = "export_eatable", hide_ui = 0 },
     { name = "Export medicine", cmd = "export_medicine", hide_ui = 0 },
     { name = "Export artefacts", cmd = "export_artefacts", hide_ui = 0 },
@@ -17,6 +20,7 @@ local cmd_list = {
     { name = "Export item icons", cmd = "export_item_icons", hide_ui = 0 },
     { name = "Export item drop locations", cmd = "export_item_drop_locations", hide_ui = 0 },
     { name = "Export disassemble table", cmd = "export_disassemble_table", hide_ui = 0 },
+    { name = "Export item parts", cmd = "export_item_parts", hide_ui = 0 },
     { name = "Export outfit exchange table", cmd = "export_outfit_exchange", hide_ui = 0 },
     { name = "Export mutant parts prices", cmd = "export_mutant_parts_prices", hide_ui = 0 },
     { name = "Export mutant profiles", cmd = "export_mutant_profiles", hide_ui = 0 },
@@ -55,6 +59,18 @@ function file_for_read(name, folder)
     return file(name, "r", folder or init_folder)
 end
 
+-- ini:line_count(section) hard-CRASHES (CInifile::r_section assert) if the section
+-- doesn't exist -- and `or 0` can't catch it, the assert throws first. The exporter
+-- assumes GAMMA's ini layout (craft category numbers, treasure sections, etc.);
+-- other modpacks differ. Use this for any line_count over a section that might be
+-- absent: returns 0 (loops just don't run) instead of CTD'ing.
+function safe_line_count(ini, section)
+    if ini and section and ini:section_exist(section) then
+        return ini:line_count(section) or 0
+    end
+    return 0
+end
+
 function debug_cmd_list.cmd.export_all(_, txt, x)
     local skip = {
         ["export_translations"] = true,
@@ -82,7 +98,7 @@ local headers_mode = 1 -- Required for items DB
 function debug_cmd_list.cmd.change_headers_mode(_, txt, x)
     headers_mode = (headers_mode + 1) % 2
     local mode_text = headers_mode == 0 and "Translated" or "Translation Keys"
-    x:SendOutput("Headers mode changed to %s", mode_text)
+    send_log(x, "Headers mode changed to %s", mode_text)
 end
 
 
@@ -113,8 +129,12 @@ function get_real_stat_value_display(upgrade_section, value, stat_type, type)
     elseif stat_type == "outfit" then
         if type:find("_protection") then
             local adb_type = utils_ui.stats_table[stat_type][type]["value_functor"][3]
-            grok_actor_damage_balancer.get_adb_constants(adb_type)
-            local adjuster = grok_actor_damage_balancer.adjuster or 0
+            -- grok_actor_damage_balancer is an optional GAMMA mod; absent on plain Anomaly.
+            local adjuster = 0
+            if grok_actor_damage_balancer then
+                grok_actor_damage_balancer.get_adb_constants(adb_type)
+                adjuster = grok_actor_damage_balancer.adjuster or 0
+            end
 
             if type == "fire_wound_protection" then
                 local bones_add = ini_sys:r_string_ex(upgrade_section, "bones_koeff_protection_add", "", "") or ""
@@ -287,10 +307,10 @@ function sort_keys(map)
 end
 
 function debug_cmd_list.cmd.export_translation_keys(_, txt, x)
-    x:SendOutput("[START] export translation keys")
+    send_log(x, "[START] export translation keys")
     local f = file_for_write("translation_keys.csv")
     if not f then
-        x:SendOutput("Failed to create translation_keys.csv")
+        send_log(x, "Failed to create translation_keys.csv")
         return
     end
     local sorted_keys = sort_keys(translated_keys)
@@ -298,18 +318,18 @@ function debug_cmd_list.cmd.export_translation_keys(_, txt, x)
         f:write(key .. "\n")
     end
     f:close()
-    x:SendOutput("[END] export translation keys - %s keys written", #sorted_keys)
+    send_log(x, "[END] export translation keys - %s keys written", #sorted_keys)
 end
 
 function debug_cmd_list.cmd.export_translations(_, txt, x)
-    x:SendOutput("[START] export translations")
+    send_log(x, "[START] export translations")
 
     local file = debug_cmd_list.split(txt) or {}
     if not file[1] then file[1] = init_folder end
 
     local keys_file = file_for_read("translation_keys.csv", file[1])
     if not keys_file then
-        x:SendOutput("translation_keys.csv not found - run Export translation keys first")
+        send_log(x, "translation_keys.csv not found - run Export translation keys first")
         return
     end
     local keys = {}
@@ -326,7 +346,7 @@ function debug_cmd_list.cmd.export_translations(_, txt, x)
     local p_file = locale .. ".csv"
     local debug_file = file_for_write(p_file, file[1])
     if not debug_file then
-        x:SendOutput("Failed to create/open file %s", p_file)
+        send_log(x, "Failed to create/open file %s", p_file)
         return
     end
     write_csv_header(debug_file, "Translation Key,Translated Value")
@@ -336,7 +356,7 @@ function debug_cmd_list.cmd.export_translations(_, txt, x)
         cnt = cnt + 1
     end
     debug_file:close()
-    x:SendOutput("[END] export translations - %s total keys exported", cnt)
+    send_log(x, "[END] export translations - %s total keys exported", cnt)
 end
 
 function translate_headers(headers)
@@ -401,8 +421,37 @@ function parse_condlist(str)
     return result
 end
 
+-- Write a message to both the in-game debug console and the xray log file.
+-- SendOutput only reaches the console; printf only reaches the log. Mirrors the
+-- weapon exporter's logging so outfit progress/failures are visible in xray_*.log.
+function send_log(x, fmt, ...)
+    printf(fmt, ...)
+    if x then
+        x:SendOutput(fmt, ...)
+    end
+end
+
+-- Re-run `callback(...)` every `delay` seconds until it returns a truthy value.
+-- Each attempt registers under a unique event name (`name .. attempt`): the
+-- time-event queue de-dupes by name, so reusing one name lets the re-registered
+-- retry be dropped and the callback would only ever run once. Used by the async
+-- (spawn-then-read) exporters for both per-item reads and batch-completion polls.
+function retry_event(name, delay, callback, ...)
+    local args = { ... }
+    local argc = select("#", ...)
+    local function step(attempt)
+        CreateTimeEvent(name .. attempt, "delay_func", delay, function(...)
+            if not callback(...) then
+                step(attempt + 1)
+            end
+            return true
+        end, unpack(args, 1, argc))
+    end
+    step(0)
+end
+
 function debug_cmd_list.cmd.export_outfits(_, txt, x)
-    x:SendOutput("[START] export outfit")
+    send_log(x, "[START] export outfit")
 
     local outfit_cls = {
         ["o_helmet"] = true,
@@ -459,7 +508,7 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
         local class = ini_sys:r_string_ex(section, "class")
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
-        --x:SendOutput("export outfit - %s, kind %s", section, kind)
+        --send_log(x, "export outfit - %s, kind %s", section, kind)
         if kind then
             class = kind
         end
@@ -474,7 +523,7 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
 
             if not se_obj then
                 printf("No server object made for [%s]", section)
-                --x:SendOutput( "No server object made for [%s]", section)
+                --send_log(x,  "No server object made for [%s]", section)
                 return
             end
             cnt = cnt + 1
@@ -493,25 +542,15 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
             local id = se_obj.id
 
             leftovers[section] = true
-            x:SendOutput("export outfit - %s, start", section)
-            local function createInterval(section, id, callback)
-                CreateTimeEvent("export_outfit_" .. section, "delay_func", 2, function(section, id)
-                    local success = callback(section, id)
-                    if not success then
-                        createInterval(section, id, callback)
-                    end
-                    return true
-                end, section, id)
-            end
-
-            createInterval(section, id, function(section, id)
+            send_log(x, "export outfit - %s, start", section)
+            retry_event("export_outfit_" .. section, 2, function(section, id)
                 local obj = level.object_by_id(id)
                 if not obj then
-                    --x:SendOutput("export outfit - %s, still online", section)
+                    --send_log(x, "export outfit - %s, still online", section)
                     return false
                 end
 
-                --x:SendOutput("export outfit - %s, back offline", section)
+                --send_log(x, "export outfit - %s, back offline", section)
                 local outfit = {}
                 outfit.typ = repair_type
                 outfit.faction = translate(ini_sys:r_string_ex(section, "community"), "st_data_export_unknown", "faction for " .. section)
@@ -548,37 +587,28 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
                 outfit.ballistic = to_percent_floor(get_outfit_stat_value(obj, section, "fire_wound_protection"))
                 outfit.br_class = round(get_outfit_stat_value(obj, section, "apres_modifier"))
 
-                outfit.powered = item_exo_device.is_exo(obj) and "Y" or "N"
+                -- item_exo_device / outfit_speed_mcm are optional GAMMA mods; absent on plain Anomaly.
+                outfit.powered = (item_exo_device and item_exo_device.is_exo(obj)) and "Y" or "N"
 
-                outfit.speed = decimal_to_percent(outfit_speed_mcm.get_outfit_speed(obj, section, false))
+                outfit.speed = outfit_speed_mcm and decimal_to_percent(outfit_speed_mcm.get_outfit_speed(obj, section, false)) or decimal_to_percent(0)
 
                 tbl[repair_type][section] = outfit
                 alife_release(se_obj)
-                x:SendOutput("export outfit - %s, done", section)
+                send_log(x, "export outfit - %s, done", section)
                 counter = counter - 1
                 leftovers[section] = nil
                 icon_candidates[section] = true
                 return true
-            end)
+            end, section, id)
         end
     end)
 
-    local function createTotalInterval(callback)
-        CreateTimeEvent("export_outfits_total", "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_outfits_total_", 5, function()
         if counter > 0 then
-            x:SendOutput("export outfit - %s outfits still to do", counter)
+            send_log(x, "export outfit - %s outfits still to do", counter)
             for section, _ in pairs(leftovers) do
                 if section then
-                    x:SendOutput("export outfit - %s still to do", section)
+                    send_log(x, "export outfit - %s still to do", section)
                 end
             end
             return false
@@ -590,8 +620,8 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
-                debug_file:close()
+                -- Can't close a handle we never got; just skip this file.
+                send_log(x, "Failed to create/open file %s", p_file)
                 return true
             end
 
@@ -619,12 +649,154 @@ function debug_cmd_list.cmd.export_outfits(_, txt, x)
                 end
             end
             debug_file:close()
-            x:SendOutput("[END] export outfit - %s outfits exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export outfit - %s outfits exported - see %s", type_cnt, p_file)
         end
 
-        x:SendOutput("[END] export outfit - %s total outfits exported", cnt)
+        send_log(x, "[END] export outfit - %s total outfits exported", cnt)
         return true
     end)
+end
+
+-- Export magazine carry capacity granted by gear from "GAMMA Mags Reloaded":
+-- outfits (slot 7), backpacks (slot 13) and belt mag-pouch artefacts. In-game these
+-- stack additively into the player's small/medium/large slot totals.
+--
+-- The mod stores mag_limit_small/medium/large in a parallel lookup table
+-- (magazines\lookups.ltx) keyed by section, NOT in the items' own configs, so it
+-- can't be read via ini_sys. We reuse the mod's own resolver
+-- (magazine_binder.get_loadout_slots) so explicit values, ":base" inheritance and
+-- the outfit kind -> o_none fallback all match the game exactly. Every provider is
+-- already in the lookup, so the resolver returns 0/0/0 for anything that isn't one
+-- (we skip those). If the mod isn't installed, magazine_binder is nil and we skip
+-- cleanly without writing a file.
+function debug_cmd_list.cmd.export_mag_capacity(_, txt, x)
+    send_log(x, "[START] export mag capacity")
+
+    if not (magazine_binder and magazine_binder.get_loadout_slots) then
+        send_log(x, "[SKIP] export mag capacity - GAMMA Mags Reloaded not installed")
+        return
+    end
+
+    -- Body-outfit classes only (worn in slot 7). Helmets carry no magazines and
+    -- aren't in the lookup, so they naturally resolve to 0/0/0 and are skipped.
+    local outfit_cls = {
+        ["o_light"] = true,
+        ["E_STLK"] = true,
+        ["EQU_STLK"] = true,
+        ["o_medium"] = true,
+        ["o_sci"] = true,
+        ["o_heavy"] = true,
+    }
+    local blacklist = {
+        ["outfit_base"] = true,
+        ["without_outfit"] = true,
+        ["mp_scientific_outfit"] = true,
+    }
+
+    local tbl = {}
+    local cnt = 0
+    ini_sys:section_for_each(function(section)
+        if blacklist[section] or is_multiplayer_item(section) then
+            return
+        end
+
+        local class = ini_sys:r_string_ex(section, "class")
+        local kind = ini_sys:r_string_ex(section, "kind")
+        if kind then class = kind end
+        local is_outfit = class and outfit_cls[class]
+
+        -- force_outfit=true (outfits only) so outfits not explicitly listed still
+        -- resolve via their kind (o_light/o_medium/...) and ultimately o_none.
+        -- For non-outfits, the resolver returns 0/0/0 unless the section is a
+        -- recognised provider (backpack / mag-pouch artefact) in the lookup.
+        local s, m, l = magazine_binder.get_loadout_slots(section, false, is_outfit and true or false)
+        s, m, l = s or 0, m or 0, l or 0
+        if not is_outfit and (s + m + l) == 0 then
+            return -- not an outfit and grants no slots: not a capacity provider
+        end
+
+        local provider = is_outfit and "outfit"
+            or (section:find("^af_") and "magpouch")
+            or "backpack"
+
+        tbl[section] = {
+            name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section),
+            provider = provider,
+            small = s,
+            medium = m,
+            large = l,
+        }
+        cnt = cnt + 1
+    end)
+
+    local p_file = "export_mag_capacity.csv"
+    local debug_file = file_for_write(p_file)
+    if debug_file == nil then
+        send_log(x, "Failed to create/open file %s", p_file)
+        return
+    end
+    local header = translate_headers({
+        "~", "pda_encyclopedia_name", "st_data_export_mag_provider",
+        "st_data_export_mag_limit_small", "st_data_export_mag_limit_medium", "st_data_export_mag_limit_large",
+    })
+    write_csv_header(debug_file, header)
+    for _, section in ipairs(sort_keys(tbl)) do
+        local v = tbl[section]
+        write_csv(debug_file, section, v.name, v.provider, v.small, v.medium, v.large)
+    end
+    debug_file:close()
+    send_log(x, "[END] export mag capacity - %s providers exported - see %s", cnt, p_file)
+end
+
+-- Per-magazine size class (small/medium/large) and round capacity. The Magazines
+-- mod (GAMMA Mags Reloaded) tags every magazine item with `mag_size` and
+-- `max_mag_size`; neither rides along in items_common_data, so emit them here.
+-- Magazines are II_ATTCH attachments flagged `is_mag`. No-ops when the mod is absent.
+function debug_cmd_list.cmd.export_magazine_info(_, txt, x)
+    send_log(x, "[START] export magazine info")
+
+    local tbl = {}
+    local cnt = 0
+    ini_sys:section_for_each(function(section)
+        if is_multiplayer_item(section) then
+            return
+        end
+        if ini_sys:r_string_ex(section, "class") ~= "II_ATTCH" then
+            return
+        end
+        if not ini_sys:r_bool_ex(section, "is_mag", false) then
+            return
+        end
+
+        tbl[section] = {
+            name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section),
+            mag_size = ini_sys:r_string_ex(section, "mag_size") or "",
+            max_mag_size = round(ini_sys:r_float_ex(section, "max_mag_size") or 0),
+        }
+        cnt = cnt + 1
+    end)
+
+    if cnt == 0 then
+        send_log(x, "[SKIP] export magazine info - GAMMA Mags Reloaded not installed (no magazine items found)")
+        return
+    end
+
+    local p_file = "export_magazine_info.csv"
+    local debug_file = file_for_write(p_file)
+    if debug_file == nil then
+        send_log(x, "Failed to create/open file %s", p_file)
+        return
+    end
+    local header = translate_headers({
+        "~", "pda_encyclopedia_name", "st_data_export_mag_size", "st_data_export_max_mag_size",
+    })
+    write_csv_header(debug_file, header)
+    for _, section in ipairs(sort_keys(tbl)) do
+        local v = tbl[section]
+        write_csv(debug_file, section, v.name, v.mag_size, v.max_mag_size)
+    end
+    debug_file:close()
+    send_log(x, "[END] export magazine info - %s magazines exported - see %s", cnt, p_file)
 end
 
 function file_exists(name)
@@ -723,7 +895,7 @@ function getEatablesUsedInCooking()
     local used_in_cooking = {}
     local from_cooking = {}
     local cooking_ini = ini_file("items\\settings\\cook.ltx")
-    n = cooking_ini:line_count("meal_list")
+    n = safe_line_count(cooking_ini, "meal_list")
     for i = 0, n - 1 do
         result, id, value = cooking_ini:r_line_ex("meal_list", i, "", "")
         if id and value then
@@ -753,7 +925,7 @@ function getEatableAlcohol(section)
 end
 
 function debug_cmd_list.cmd.export_eatable(_, txt, x)
-    x:SendOutput("[START] export eatable")
+    send_log(x, "[START] export eatable")
 
     local food_kinds = {
         ["i_mutant_raw"] = true,
@@ -789,7 +961,7 @@ function debug_cmd_list.cmd.export_eatable(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and food_kinds[kind] then
-            x:SendOutput("export eatable - %s", section)
+            send_log(x, "export eatable - %s", section)
             local eatable = {}
             eatable.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             eatable.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -846,7 +1018,7 @@ function debug_cmd_list.cmd.export_eatable(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export outfit - %s total eatable exported", cnt)
+    send_log(x, "[END] export outfit - %s total eatable exported", cnt)
 end
 
 function build_bhs_summary(t_name, sec)
@@ -855,7 +1027,7 @@ function build_bhs_summary(t_name, sec)
     local arm = 0
     local leg = 0
     local timeregen = 0
-    if sec and t_name[sec] then
+    if sec and t_name and t_name[sec] then
         for limb, val in pairs(t_name[sec]) do
             if limb == "head" then
                 head = val
@@ -880,7 +1052,7 @@ function export_recipes(craft_index)
 
     local ini = itms_manager.ini_craft
     local ind_str = tostring(craft_index)
-    local n = ini:line_count(ind_str) or 0
+    local n = safe_line_count(ini, ind_str)
     for i = 0, n - 1 do
         local result, id, value = ini:r_line(ind_str, i, "", "")
         id = string.sub(id, 3)
@@ -942,7 +1114,7 @@ function export_artefacts_recipes()
 end
 
 function debug_cmd_list.cmd.export_medicine(_, txt, x)
-    x:SendOutput("[START] export medicine")
+    send_log(x, "[START] export medicine")
 
     local food_kinds = {
         ["i_medical"] = true,
@@ -976,7 +1148,7 @@ function debug_cmd_list.cmd.export_medicine(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and food_kinds[kind] then
-            x:SendOutput("export medicine - %s", section)
+            send_log(x, "export medicine - %s", section)
             local eatable = {}
             eatable.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             eatable.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1023,8 +1195,9 @@ function debug_cmd_list.cmd.export_medicine(_, txt, x)
 
             eatable.weight_carried = floor_with_precision(ini_sys:r_float_ex(section, "boost_max_weight") or 0)
 
-            eatable.perm_head, eatable.perm_torso, eatable.perm_arm, eatable.perm_leg, eatable.perm_timeregen = build_bhs_summary(zzz_player_injuries.healhelp, section)
-            eatable.temp_head, eatable.temp_torso, eatable.temp_arm, eatable.temp_leg, eatable.hp_active = build_bhs_summary(zzz_player_injuries.medkits, section)
+            -- zzz_player_injuries is an optional GAMMA mod; absent on plain Anomaly (build_bhs_summary tolerates nil).
+            eatable.perm_head, eatable.perm_torso, eatable.perm_arm, eatable.perm_leg, eatable.perm_timeregen = build_bhs_summary(zzz_player_injuries and zzz_player_injuries.healhelp, section)
+            eatable.temp_head, eatable.temp_torso, eatable.temp_arm, eatable.temp_leg, eatable.hp_active = build_bhs_summary(zzz_player_injuries and zzz_player_injuries.medkits, section)
 
             eatable.used_in_crafting = used_in_crafting[section] and "Y" or "N"
             eatable.craftable = craftable[section] and "Y" or "N"
@@ -1048,13 +1221,13 @@ function debug_cmd_list.cmd.export_medicine(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export medicine - %s total medicine exported", cnt)
+    send_log(x, "[END] export medicine - %s total medicine exported", cnt)
 end
 
 function get_perk_artifacts_list()
     local perk_artefacts = {}
 
-    for i, v in pairs(perk_based_artefacts) do
+    for i, v in pairs(perk_based_artefacts or {}) do
         if type(v) == "table" and string.find(i, "artefact_on_") then
             for j, k in pairs(v) do
                 perk_artefacts[j] = "st_pba_" .. j .. "_perk"
@@ -1096,7 +1269,7 @@ function get_perk_description(section, perk_key)
 end
 
 function debug_cmd_list.cmd.export_artefacts(_, txt, x)
-    x:SendOutput("[START] export artefacts")
+    send_log(x, "[START] export artefacts")
 
     local artefacts_kinds = {
         ["i_arty"] = true,
@@ -1134,7 +1307,7 @@ function debug_cmd_list.cmd.export_artefacts(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and artefacts_kinds[kind] then
-            x:SendOutput("export artefact - %s", section)
+            send_log(x, "export artefact - %s", section)
             local artefact = {}
             artefact.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             artefact.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1200,7 +1373,7 @@ function debug_cmd_list.cmd.export_artefacts(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export artefacts - %s total artefacts exported", cnt)
+    send_log(x, "[END] export artefacts - %s total artefacts exported", cnt)
 end
 
 -- Craft category index to filename suffix mapping
@@ -1217,7 +1390,7 @@ local craft_category_files = {
 }
 
 function debug_cmd_list.cmd.export_craft_recipes(_, txt, x)
-    x:SendOutput("[START] export craft recipes")
+    send_log(x, "[START] export craft recipes")
 
     local ini = itms_manager.ini_craft
     local ind = 1
@@ -1273,16 +1446,16 @@ function debug_cmd_list.cmd.export_craft_recipes(_, txt, x)
         end
         debug_file:close()
 
-        x:SendOutput("[PROGRESS] export craft recipes - category %s (%s) - %s recipes - see in Gamma\\Overwrite\\bin\\%s", ind, suffix, cnt, p_file)
+        send_log(x, "[PROGRESS] export craft recipes - category %s (%s) - %s recipes - see in Gamma\\Overwrite\\bin\\%s", ind, suffix, cnt, p_file)
         total_cnt = total_cnt + cnt
         ind = ind + 1
     end
 
-    x:SendOutput("[END] export craft recipes - %s total recipes exported across %s categories", total_cnt, ind - 1)
+    send_log(x, "[END] export craft recipes - %s total recipes exported across %s categories", total_cnt, ind - 1)
 end
 
 function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
-    x:SendOutput("[START] export belt attachments")
+    send_log(x, "[START] export belt attachments")
 
     local artefacts_kinds = {
         ["i_mutant_belt"] = true,
@@ -1311,7 +1484,7 @@ function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind and artefacts_kinds[kind] or whitelist[section] then
-            x:SendOutput("export belt attachment - %s", section)
+            send_log(x, "export belt attachment - %s", section)
             local belt_attachment = {}
             belt_attachment.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
             belt_attachment.cost = ini_sys:r_float_ex(section, "cost") or 0
@@ -1360,7 +1533,7 @@ function debug_cmd_list.cmd.export_belt_attachments(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export belt attachments - %s total attachments exported", cnt)
+    send_log(x, "[END] export belt attachments - %s total attachments exported", cnt)
 end
 
 local blacklist_ammo = {
@@ -1494,8 +1667,56 @@ function is_weapon_modification(section)
     return false
 end
 
+-- Weapon → compatible magazines (GAMMA Mags Reloaded). A magazine fits a weapon
+-- when they share a base_type; resolve via the binder's own lookups so it always
+-- matches in-game behaviour. One row per weapon: section, mag_id, mag_id, ...
+-- No-ops cleanly when the mod isn't installed.
+function debug_cmd_list.cmd.export_weapon_magazine_map(_, txt, x)
+    send_log(x, "[START] export weapon magazine map")
+
+    if not (magazine_binder and magazine_binder.get_weapon_base_type and magazine_binder.get_mags_for_basetype) then
+        send_log(x, "[SKIP] export weapon magazine map - GAMMA Mags Reloaded not installed")
+        return
+    end
+
+    local sections_queue = {}
+    ini_sys:section_for_each(function(section)
+        local kind = ini_sys:r_string_ex(section, "kind")
+        local class = ini_sys:r_string_ex(section, "class")
+        if kind == "" then kind = class end
+        if kind and weapon_kinds[kind] and not is_weapon_modification(section) and not is_multiplayer_item(section) then
+            table.insert(sections_queue, section)
+        end
+    end)
+    table.sort(sections_queue)
+
+    local f = file_for_write("export_weapon_magazine_map.csv")
+    local cnt = 0
+    for _, section in ipairs(sections_queue) do
+        -- pcall: get_weapon_base_type touches ammo data and can throw on odd weapons
+        local ok, bt = pcall(magazine_binder.get_weapon_base_type, section)
+        if ok and bt then
+            local mags = magazine_binder.get_mags_for_basetype(bt) or {}
+            local row = { section }
+            local seen = {}
+            for _, mag in ipairs(mags) do
+                if mag and not seen[mag] then
+                    seen[mag] = true
+                    table.insert(row, mag)
+                end
+            end
+            if #row > 1 then
+                write_csv(f, unpack(row))
+                cnt = cnt + 1
+            end
+        end
+    end
+    f:close()
+    send_log(x, "[END] export weapon magazine map - %s weapons mapped - see export_weapon_magazine_map.csv", cnt)
+end
+
 function debug_cmd_list.cmd.export_weapons(_, txt, x)
-    x:SendOutput("[START] export weapons")
+    send_log(x, "[START] export weapons")
 
     local blacklist = {
         ["wpn_colt_kimber"] = true,
@@ -1548,7 +1769,7 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
 
     local function process_queue(idx, itr)
         if idx > #sections_queue then
-            x:SendOutput("[END] export weapons - %s total exported", cnt)
+            send_log(x, "[END] export weapons - %s total exported", cnt)
             return true
         end
         local section = sections_queue[idx]
@@ -1636,7 +1857,7 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
             tbl[kind][section] = weapon
             icon_candidates[section] = true
             alife_release(se_obj)
-            x:SendOutput("export weapon - %s, done", section)
+            send_log(x, "export weapon - %s, done", section)
             leftToProcess = leftToProcess - 1
             item_id = nil
             process_queue(idx + 1, 0)
@@ -1648,19 +1869,9 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
     -- Start processing the queue
     process_queue(1, 0)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_weapons_total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_weapons_total_", 5, function()
         if leftToProcess > 0 then
-            x:SendOutput("export weapons - %s weapons still to do", leftToProcess)
+            send_log(x, "export weapons - %s weapons still to do", leftToProcess)
             return false
         end
 
@@ -1670,8 +1881,8 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
-                debug_file:close()
+                -- Can't close a handle we never got; just skip this file.
+                send_log(x, "Failed to create/open file %s", p_file)
                 return true
             end
 
@@ -1686,12 +1897,12 @@ function debug_cmd_list.cmd.export_weapons(_, txt, x)
                 type_cnt = type_cnt + 1
             end
             debug_file:close()
-            x:SendOutput("[END] export weapons - %s weapons exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export weapons - %s weapons exported - see %s", type_cnt, p_file)
         end
 
-        x:SendOutput("[END] export weapons - %s total weapons exported", cnt)
+        send_log(x, "[END] export weapons - %s total weapons exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function get_heavy_attack_damage(obj, sec)
@@ -1735,7 +1946,7 @@ function prop_damage(obj, sec, name)
 end
 
 function debug_cmd_list.cmd.export_melee(_, txt, x)
-    x:SendOutput("[START] export melee")
+    send_log(x, "[START] export melee")
 
     local weapon_kinds = {
         ["w_melee"] = "melee",
@@ -1772,32 +1983,22 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
 
             if not se_obj then
                 printf("No server object made for [%s]", section)
-                --x:SendOutput( "No server object made for [%s]", section)
+                --send_log(x,  "No server object made for [%s]", section)
                 return
             end
             cnt = cnt + 1
             counter = counter + 1
             local id = se_obj.id
 
-            x:SendOutput("export melee - %s, start", section)
-            local function createInterval(section, id, callback, idx)
-                CreateTimeEvent("export_melee_" .. section .. "_" .. idx, "delay_func", 2, function(section, id)
-                    local success = callback(section, id)
-                    if not success then
-                        createInterval(section, id, callback, idx + 1)
-                    end
-                    return true
-                end, section, id)
-            end
-
-            createInterval(section, id, function(section, id)
+            send_log(x, "export melee - %s, start", section)
+            retry_event("export_melee_" .. section .. "_", 2, function(section, id)
                 local obj = level.object_by_id(id)
                 if not obj then
-                    --x:SendOutput("export weapon - %s, still online", section)
+                    --send_log(x, "export weapon - %s, still online", section)
                     return false
                 end
 
-                --x:SendOutput("export weapon - %s, back offline", section)
+                --send_log(x, "export weapon - %s, back offline", section)
                 local weapon = {}
                 weapon.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
                 weapon.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
@@ -1806,8 +2007,10 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 weapon.max_range = get_weapon_stat_value(obj, section, "max_range")
                 local ammo = ini_sys:r_string_ex(section, "ammo_class")
                 weapon.br = (ammo and ini_sys:r_float_ex(ammo, "k_ap") or 0) * 10 * 100 * get_game_difficulty_multiplier()
-                weapon.pelts_quality_min = zz_item_artefact.knifesm[section] and to_percent_string(zz_item_artefact.knifesm[section].min) or ""
-                weapon.pelts_quality_max = zz_item_artefact.knifesm[section] and to_percent_string(zz_item_artefact.knifesm[section].max) or ""
+                -- zz_item_artefact is an optional GAMMA mod; absent on plain Anomaly.
+                local knifesm = zz_item_artefact and zz_item_artefact.knifesm and zz_item_artefact.knifesm[section]
+                weapon.pelts_quality_min = knifesm and to_percent_string(knifesm.min) or ""
+                weapon.pelts_quality_max = knifesm and to_percent_string(knifesm.max) or ""
                 weapon.cuts_thick_skin = (section:match('wpn_knife$') or section:match('wpn_knife2$') or not string.find(section, "knife")) and "N" or "Y"
                 weapon.light_attack_power = prop_damage(obj, section, "hit_power")
                 weapon.heavy_attack_power = prop_damage(obj, section, "hit_power_2")
@@ -1815,26 +2018,16 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 tbl[kind][section] = weapon
                 icon_candidates[section] = true
                 alife_release(se_obj)
-                x:SendOutput("export melee - %s, done", section)
+                send_log(x, "export melee - %s, done", section)
                 counter = counter - 1
                 return true
-            end, 0)
+            end, section, id)
         end
     end)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_melee_total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_melee_total_", 5, function()
         if counter > 0 then
-            x:SendOutput("export melee - %s weapons still to do", counter)
+            send_log(x, "export melee - %s weapons still to do", counter)
             return false
         end
 
@@ -1844,8 +2037,8 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
             local debug_file = file_for_write(p_file)
 
             if (debug_file == nil) then
-                x:SendOutput("Failed to create/open file %s", p_file)
-                debug_file:close()
+                -- Can't close a handle we never got; just skip this file.
+                send_log(x, "Failed to create/open file %s", p_file)
                 return true
             end
 
@@ -1860,11 +2053,11 @@ function debug_cmd_list.cmd.export_melee(_, txt, x)
                 type_cnt = type_cnt + 1
             end
             debug_file:close()
-            x:SendOutput("[END] export melee - %s melee exported - see %s", type_cnt, p_file)
+            send_log(x, "[END] export melee - %s melee exported - see %s", type_cnt, p_file)
         end
-        x:SendOutput("[END] export melee - %s total melee exported", cnt)
+        send_log(x, "[END] export melee - %s total melee exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function is_multiplayer_item(section)
@@ -1873,7 +2066,7 @@ function is_multiplayer_item(section)
 end
 
 function debug_cmd_list.cmd.export_explosives(_, txt, x)
-    x:SendOutput("[START] export explosives")
+    send_log(x, "[START] export explosives")
 
     local mines = {}
     for mine, id in pairs(txr_mines.FX_BY_SECTION) do
@@ -1919,7 +2112,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
             if explosive.cost == 0 then
                 return
             end
-            x:SendOutput("export explosive - %s", section)
+            send_log(x, "export explosive - %s", section)
             explosive.weight = floor_with_precision(ini_sys:r_float_ex(section, "inv_weight") or 0)
             local explosive_section = nil
             if rocket_class then
@@ -1931,7 +2124,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
             elseif kind and kind == "w_explosive" then
                 explosive_section = section
             else
-                x:SendOutput("export explosive - %s, no explosive section found", section)
+                send_log(x, "export explosive - %s, no explosive section found", section)
                 return
             end
             explosive.blast_power = ini_sys:r_float_ex(explosive_section, "blast") or 0
@@ -1960,7 +2153,7 @@ function debug_cmd_list.cmd.export_explosives(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export explosives - %s total explosives exported", cnt)
+    send_log(x, "[END] export explosives - %s total explosives exported", cnt)
 end
 
 --local difficulty_scaling = ballistics_mcm and ballistics_mcm.get_config("difficulty_scaling") or false
@@ -2033,7 +2226,7 @@ function sanitize_value(name)
 end
 
 function debug_cmd_list.cmd.export_ammo(_, txt, x)
-    x:SendOutput("[START] export ammo")
+    send_log(x, "[START] export ammo")
 
     local tbl = {}
     local cnt = 0
@@ -2045,12 +2238,12 @@ function debug_cmd_list.cmd.export_ammo(_, txt, x)
         local kind = ini_sys:r_string_ex(section, "kind") -- special class name for the sake of correct listing
 
         if kind == "w_ammo" then
-            x:SendOutput("export ammo - %s", section)
+            send_log(x, "export ammo - %s", section)
             local ammo = {}
             ammo.name = sanitize_ammo_name(translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section))
             ammo.description = (translate_with_context(ini_sys:r_string_ex(section, "description"), "description for " .. section) or ""):sanitize()
             ammo.cost = ini_sys:r_float_ex(section, "cost") or 0
-            ammo.box_size = round(ini_sys:r_float_ex(section, "box_size"))
+            ammo.box_size = round(ini_sys:r_float_ex(section, "box_size") or 0)
             ammo.weight = floor_with_precision(ini_sys:r_float_ex(section, "inv_weight") or 0)
             ammo.projectiles = ini_sys:r_float_ex(section, "buck_shot") or 1
             ammo.damage = ini_sys:r_float_ex(section, "k_hit") or 0
@@ -2084,11 +2277,11 @@ function debug_cmd_list.cmd.export_ammo(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export ammo - %s total ammo exported", cnt)
+    send_log(x, "[END] export ammo - %s total ammo exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
-    x:SendOutput("[START] export disassemble table")
+    send_log(x, "[START] export disassemble table")
 
     local blacklist = {
         ["ammo"] = true,
@@ -2114,7 +2307,7 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
             return
         end
         local parts_tbl = str_explode(partsRaw, ",")
-        x:SendOutput("export disassemble item - %s", section)
+        send_log(x, "export disassemble item - %s", section)
 
         local disassemble = {}
         local item_name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
@@ -2178,7 +2371,7 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
     end
     disassembles_file:close()
 
-    x:SendOutput("[PROGRESS-1] export disassemble - %s total disassembles exported - see in Gamma\\Overwrite\\bin\\export_disassemble_table.csv", disassemble_count)
+    send_log(x, "[PROGRESS-1] export disassemble - %s total disassembles exported - see in Gamma\\Overwrite\\bin\\export_disassemble_table.csv", disassemble_count)
 
     local materials_file_name = "export_disassembles_materials.csv"
     local materials_file = file_for_write(materials_file_name)
@@ -2200,11 +2393,152 @@ function debug_cmd_list.cmd.export_disassemble_table(_, txt, x)
         write_csv(materials_file, unpack(parts))
     end
 
-    x:SendOutput("[END] export materials - %s total materials exported", materials_count)
+    send_log(x, "[END] export materials - %s total materials exported", materials_count)
+end
+
+-- Export each weapon's component parts (Weapon Parts Overhaul). The salvage disassembly
+-- above reads [nor_parts_list]; a weapon's physical components instead live in
+-- [con_parts_list] of items\settings\parts.ltx -- the same ini already loaded as
+-- itms_manager.ini_parts and read by the game via r_string_ex("con_parts_list", wpn).
+-- Each value is a flat, distinct list of prt_w_* sections (one of each, with NO
+-- repeat-count numbers), e.g. wpn_vz61 = prt_w_barrel_11, prt_w_trigger_components_2, ...
+--
+-- WPO / itms_manager are optional: on plain Anomaly or other modpacks ini_parts or the
+-- con_parts_list section may be absent, so guard and [SKIP] cleanly like the other
+-- optional-mod exporters rather than CTD'ing. Part sections often carry their inv_name
+-- only via inheritance, but ini_sys (the merged system ini) resolves that. We emit the
+-- part section id (it preserves the tier suffix -- several tiers share one display name)
+-- alongside the translated name.
+-- WPO's con_parts_list covers anything with physical components: both weapons and
+-- outfits/helmets. Classify each owner by its class so downstream can tell them apart
+-- (the same part sections, e.g. prt_w_*/prt_o_*, otherwise look interchangeable).
+local part_owner_outfit_cls = {
+    ["o_helmet"] = true, ["E_HLMET"] = true, ["EQU_HLMET"] = true,
+    ["o_light"] = true,
+    ["E_STLK"] = true, ["EQU_STLK"] = true,
+    ["o_medium"] = true, ["o_sci"] = true, ["o_heavy"] = true,
+}
+local function part_owner_kind(section)
+    local class = ini_sys:r_string_ex(section, "class")
+    if not class then return "other" end
+    if part_owner_outfit_cls[class] then return "outfit" end
+    if class:sub(1, 3) == "WP_" then return "weapon" end
+    return "other"
+end
+
+function debug_cmd_list.cmd.export_item_parts(_, txt, x)
+    send_log(x, "[START] export item parts")
+
+    local ini_parts = itms_manager and itms_manager.ini_parts
+    if not ini_parts then
+        send_log(x, "[SKIP] export item parts - itms_manager.ini_parts not available (Weapon Parts Overhaul not installed)")
+        return
+    end
+    if not ini_parts:section_exist("con_parts_list") then
+        send_log(x, "[SKIP] export item parts - con_parts_list section not found (Weapon Parts Overhaul not installed)")
+        return
+    end
+
+    -- Normalized output: tbl maps each item to its kind + ordered list of part ids;
+    -- part_defs holds each unique part's fields once (the same part is shared by many
+    -- items, so storing fields per-reference would duplicate them ~14x). The site joins
+    -- the two by part id.
+    local tbl = {}
+    local part_defs = {}
+    local max_parts = 0
+    local cnt = 0
+    ini_sys:section_for_each(function(section)
+        local partsRaw = ini_parts:r_string_ex("con_parts_list", section)
+        if partsRaw == nil then
+            return
+        end
+
+        local row = {
+            name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section),
+            kind = part_owner_kind(section),
+            parts = {},
+        }
+        for _, part in ipairs(str_explode(partsRaw, ",")) do
+            local part_section = part and part:trim() or ""
+            if part_section ~= "" and ini_sys:section_exist(part_section) then
+                row.parts[#row.parts + 1] = part_section
+                icon_candidates[part_section] = true
+                if not part_defs[part_section] then
+                    part_defs[part_section] = {
+                        name = translate_with_context(ini_sys:r_string_ex(part_section, "inv_name"), "item name for " .. part_section),
+                        descr = (translate_with_context(ini_sys:r_string_ex(part_section, "description"), "description for " .. part_section) or ""):sanitize(),
+                        cost = ini_sys:r_float_ex(part_section, "cost") or 0,
+                        weight = floor_with_precision(ini_sys:r_float_ex(part_section, "inv_weight") or 0),
+                    }
+                end
+            end
+        end
+
+        if #row.parts > 0 then
+            tbl[section] = row
+            icon_candidates[section] = true
+            cnt = cnt + 1
+            if #row.parts > max_parts then
+                max_parts = #row.parts
+            end
+            send_log(x, "export item parts - %s (%s), %s parts", section, row.kind, #row.parts)
+        end
+    end)
+
+    -- File 1: item -> kind + part-id mapping. Wide row padded to the widest item seen.
+    local p_file = "export_item_parts.csv"
+    local debug_file = file_for_write(p_file)
+    if debug_file == nil then
+        send_log(x, "Failed to create/open file %s", p_file)
+        return
+    end
+
+    local header_cols = { "~", "pda_encyclopedia_name", "st_data_export_part_kind" }
+    for i = 1, math.max(max_parts, 1) do
+        header_cols[#header_cols + 1] = "st_data_export_part"
+    end
+    write_csv_header(debug_file, translate_headers(header_cols))
+
+    for _, section in ipairs(sort_keys(tbl)) do
+        local row = tbl[section]
+        local cols = { section, row.name, row.kind }
+        for _, part_id in ipairs(row.parts) do
+            cols[#cols + 1] = part_id
+        end
+        write_csv(debug_file, unpack(cols))
+    end
+    debug_file:close()
+
+    -- File 2: one row per unique part section with its standard fields.
+    local d_file = "export_item_part_defs.csv"
+    local defs_file = file_for_write(d_file)
+    if defs_file == nil then
+        send_log(x, "Failed to create/open file %s", d_file)
+        return
+    end
+
+    write_csv_header(defs_file, translate_headers(
+        { "~", "pda_encyclopedia_name", "st_data_export_description", "st_upgr_cost", "st_prop_weight" }))
+
+    local part_cnt = 0
+    for _, part_id in ipairs(sort_keys(part_defs)) do
+        local d = part_defs[part_id]
+        write_csv(defs_file, part_id, d.name, d.descr, d.cost, d.weight)
+        part_cnt = part_cnt + 1
+    end
+    defs_file:close()
+
+    send_log(x, "[END] export item parts - %s items, %s unique parts - see %s / %s", cnt, part_cnt, p_file, d_file)
 end
 
 function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
-    x:SendOutput("[START] export outfit exchange")
+    send_log(x, "[START] export outfit exchange")
+
+    -- grok_armor_convert is an optional GAMMA mod (armor exchange); absent elsewhere.
+    if not grok_armor_convert then
+        send_log(x, "[SKIP] export outfit exchange - grok armor convert (GAMMA) not present")
+        return
+    end
 
     local outfit_map = {}
     for variable, value in pairs(grok_armor_convert) do
@@ -2287,11 +2621,11 @@ function debug_cmd_list.cmd.export_outfit_exchange(_, txt, x)
     end
     file:close()
 
-    x:SendOutput("[END] outfit exchange - %s total exchanges exported", cnt)
+    send_log(x, "[END] outfit exchange - %s total exchanges exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
-    x:SendOutput("[START] export mutant parts prices")
+    send_log(x, "[START] export mutant parts prices")
 
     local fake_butcher
     local fake_sakharov
@@ -2314,12 +2648,12 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
     end
 
     if not fake_butcher then
-        x:SendOutput("Unable to find any NPCs on level for faking Butcher")
+        send_log(x, "Unable to find any NPCs on level for faking Butcher")
         return
     end
 
     if not fake_sakharov then
-        x:SendOutput("Unable to find any NPCs on level for faking Sakharov")
+        send_log(x, "Unable to find any NPCs on level for faking Sakharov")
         return
     end
 
@@ -2365,34 +2699,24 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
 
         if not se_obj then
             printf("No server object made for [%s]", section)
-            x:SendOutput("No server object made for [%s]", section)
+            send_log(x, "No server object made for [%s]", section)
             return
         end
         cnt = cnt + 1
         processing_counter = processing_counter + 1
         local id = se_obj.id
 
-        x:SendOutput("export mutant part price - %s, start", section)
-        local function createInterval(section, id, callback, idx)
-            CreateTimeEvent("export_mutant_part_price_" .. section .. "_" .. idx, "delay_func", 2, function(section, id)
-                local success = callback(section, id)
-                if not success then
-                    createInterval(section, id, callback, idx + 1)
-                end
-                return true
-            end, section, id)
-        end
-
-        createInterval(section, id, function(section, id)
+        send_log(x, "export mutant part price - %s, start", section)
+        retry_event("export_mutant_part_price_" .. section .. "_", 2, function(section, id)
             local obj = level.object_by_id(id)
             if not obj then
-                x:SendOutput("export part - %s, still online", section)
+                send_log(x, "export part - %s, still online", section)
                 return false
             end
             if not obj.section then
-                x:SendOutput("export mutant part price - %s, failed", section)
+                send_log(x, "export mutant part price - %s, failed", section)
                 processing_counter = processing_counter - 1
-                --x:SendOutput("export weapon - %s, still online", section)
+                --send_log(x, "export weapon - %s, still online", section)
                 alife_release(se_obj)
                 return true
             end
@@ -2401,30 +2725,24 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
             part = {}
             part.type = type
             part.name = translate_with_context(ini_sys:r_string_ex(section, "inv_name"), "item name for " .. section)
-            part.sakharov_price = math.floor(utils_item.get_item_cost(obj, sakharov_profile))
-            part.butcher_price = math.floor(utils_item.get_item_cost(obj, butcher_profile))
+            -- utils_item.get_item_cost can return false (not a number) when an item
+            -- isn't priceable against a trader's profile on some modpacks; math.floor
+            -- on a boolean CTDs. `or 0` collapses false/nil to 0 ("no price").
+            -- NB: do NOT use type() here -- `type` is shadowed by a local number above.
+            part.sakharov_price = math.floor(utils_item.get_item_cost(obj, sakharov_profile) or 0)
+            part.butcher_price = math.floor(utils_item.get_item_cost(obj, butcher_profile) or 0)
 
             parts[section] = part
             alife_release(se_obj)
-            x:SendOutput("export mutant part price - %s, done", section)
+            send_log(x, "export mutant part price - %s, done", section)
             processing_counter = processing_counter - 1
             return true
-        end, 0)
+        end, section, id)
     end)
 
-    local function createTotalInterval(callback, idx)
-        CreateTimeEvent("export_mutant_part_price__total_" .. idx, "delay_func", 5, function()
-            local success = callback()
-            if not success then
-                createTotalInterval(callback, idx + 1)
-            end
-            return true
-        end)
-    end
-
-    createTotalInterval(function()
+    retry_event("export_mutant_part_price__total_", 5, function()
         if processing_counter > 0 then
-            x:SendOutput("export mutant parts prices - %s parts still to do", processing_counter)
+            send_log(x, "export mutant parts prices - %s parts still to do", processing_counter)
             return false
         end
 
@@ -2432,7 +2750,7 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
         local file = file_for_write(p_file)
 
         if (file == nil) then
-            x:SendOutput("Failed to create/open file %s", p_file)
+            send_log(x, "Failed to create/open file %s", p_file)
             return true
         end
 
@@ -2451,13 +2769,13 @@ function debug_cmd_list.cmd.export_mutant_parts_prices(_, txt, x)
                     section, part.name, part.sakharov_price, part.butcher_price)
         end
         file:close()
-        x:SendOutput("[END] mutant parts prices - %s total parts exported", cnt)
+        send_log(x, "[END] mutant parts prices - %s total parts exported", cnt)
         return true
-    end, 0)
+    end)
 end
 
 function debug_cmd_list.cmd.export_mutant_profiles(_, txt, x)
-    x:SendOutput("[START] export mutant profiles")
+    send_log(x, "[START] export mutant profiles")
 
     local function read_bone_mult(damage_sect, bone)
         local raw = ini_sys:r_string_ex(damage_sect, bone)
@@ -2528,7 +2846,7 @@ function debug_cmd_list.cmd.export_mutant_profiles(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export mutant profiles - %s profiles written - see %s", cnt, p_file)
+    send_log(x, "[END] export mutant profiles - %s profiles written - see %s", cnt, p_file)
 end
 
 function get_weapon_kind(kind)
@@ -2540,7 +2858,7 @@ function get_weapon_kind(kind)
 end
 
 function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
-    x:SendOutput("[START] export weapon drop sources")
+    send_log(x, "[START] export weapon drop sources")
 
     local skip_sections = {
         ['skip_npcs'] = true,
@@ -2562,12 +2880,11 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
         if skip_sections[section] then
             return
         end
-
         if not drop_ini:line_exist(section, "primary") then
             return
         end
 
-        local n = drop_ini:line_count(section) or 0
+        local n = safe_line_count(drop_ini, section)
         local id, value, drop_section, m, tmp, gun_section, faction, rank, tmpfk
         if (n > 0) then
             for i = 0, n - 1 do
@@ -2590,7 +2907,7 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
                 end
                 printf("section %s, faction %s, rank %s", section, faction, rank)
 
-                m = drop_ini:line_count(drop_section) or 0
+                m = safe_line_count(drop_ini, drop_section)
                 for j = 0, m - 1 do
                     _, id, value = drop_ini:r_line_ex(drop_section, j, "", "")
                     tmp = str_explode(id, ":")
@@ -2678,12 +2995,12 @@ function debug_cmd_list.cmd.export_weapon_drop_sources(_, txt, x)
 
     file:close()
 
-    x:SendOutput("[END] weapon drop sources - %s total guns exported", cnt)
+    send_log(x, "[END] weapon drop sources - %s total guns exported", cnt)
 end
 
 
 function debug_cmd_list.cmd.export_item_list(_, txt, x)
-    x:SendOutput("[START] export items list")
+    send_log(x, "[START] export items list")
 
     -- Load buy_sell ini file for loot check
     local buy_sell_ini = ini_file("items\\trade\\gulag_job_trade_buy_sell.ltx")
@@ -2741,11 +3058,11 @@ function debug_cmd_list.cmd.export_item_list(_, txt, x)
     end
     debug_file:close()
 
-    x:SendOutput("[END] export items - %s total items exported", cnt)
+    send_log(x, "[END] export items - %s total items exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_items_common_data(_, txt, x)
-    x:SendOutput("[START] export items common data")
+    send_log(x, "[START] export items common data")
 
     local tbl = {}
     local cnt = 0
@@ -2783,11 +3100,17 @@ function debug_cmd_list.cmd.export_items_common_data(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export items common data - %s items exported", cnt)
+    send_log(x, "[END] export items common data - %s items exported", cnt)
 end
 
 function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
-    x:SendOutput("[START] export stash drop rates")
+    send_log(x, "[START] export stash drop rates")
+
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.ini_treasure and treasure_manager.map_tiers) then
+        send_log(x, "[SKIP] export stash drop rates - GAMMA treasure data not present")
+        return
+    end
 
     local use_item_names = true  -- set to true to output display names instead of section IDs
 
@@ -2805,7 +3128,7 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     local num_tiers = 5
 
     for stash_type, ltx_section in pairs(stash_sections) do
-        local n = ini_tm:line_count(ltx_section)
+        local n = safe_line_count(ini_tm, ltx_section)
         for i = 0, n - 1 do
             local _, kind, value = ini_tm:r_line(ltx_section, i, "", "")
             if kind and value and kind ~= "" and value ~= "" then
@@ -2829,7 +3152,7 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     -- Parse possible_items: build section -> {kind, tier, allowed_ecos}
     local all_ecos = { 1, 2, 3 }
     local items = {}
-    local n = ini_tm:line_count("possible_items")
+    local n = safe_line_count(ini_tm, "possible_items")
     for i = 0, n - 1 do
         local _, section, value = ini_tm:r_line("possible_items", i, "", "")
         if section and section ~= "" then
@@ -2939,11 +3262,17 @@ function debug_cmd_list.cmd.export_stash_drop_rates(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export stash drop rates - %s map rows written", row_count)
+    send_log(x, "[END] export stash drop rates - %s map rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
-    x:SendOutput("[START] export toolkit map rates")
+    send_log(x, "[START] export toolkit map rates")
+
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.tools_map_tiers) then
+        send_log(x, "[SKIP] export toolkit map rates - GAMMA treasure data not present")
+        return
+    end
 
     -- Toolkit probability per tier (steady-state: all prerequisite kits already found)
     local toolkit_probs = {
@@ -3013,11 +3342,11 @@ function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export toolkit map rates - %s map rows written", row_count)
+    send_log(x, "[END] export toolkit map rates - %s map rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_upgrades(_, txt, x)
-    x:SendOutput("[START] export upgrades")
+    send_log(x, "[START] export upgrades")
 
     -- ── Pass 1: collect all items with upgrades ──────────────────────────
     local all_items = {}  -- section -> { name, upgrades[] }
@@ -3141,13 +3470,13 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
         item_count = item_count + 1
     end
     f1:close()
-    x:SendOutput("export upgrades - %s items written", item_count)
+    send_log(x, "export upgrades - %s items written", item_count)
 
     -- ── Pass 3: determine max property count for File 2 column width ─────
     local max_props = 0
     for _, sections in pairs(all_stats_sections) do
         for stats_sec in pairs(sections) do
-            local n = ini_sys:line_count(stats_sec)
+            local n = safe_line_count(ini_sys, stats_sec)
             if n and n > max_props then max_props = n end
         end
     end
@@ -3178,7 +3507,7 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
     for _, entry in ipairs(sorted_stats) do
         local stat_type = entry.stat_type
         local stats_sec = entry.stats_sec
-        local n = ini_sys:line_count(stats_sec) or 0
+        local n = safe_line_count(ini_sys, stats_sec)
         local props_written = 0
         local parts = {stats_sec, stat_type}
 
@@ -3284,11 +3613,11 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
         printf(stat)
     end
 
-    x:SendOutput("[END] export upgrades - %s items, %s upgrade sections", item_count, sec_count)
+    send_log(x, "[END] export upgrades - %s items, %s upgrade sections", item_count, sec_count)
 end
 
 function debug_cmd_list.cmd.export_item_icons(_, txt, x)
-    x:SendOutput("[START] export item icons")
+    send_log(x, "[START] export item icons")
 
     local blacklist = {
         ["weapon_ammo_parts"] = true, -- not an item
@@ -3331,11 +3660,17 @@ function debug_cmd_list.cmd.export_item_icons(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export item icons - %s sections written", cnt)
+    send_log(x, "[END] export item icons - %s sections written", cnt)
 end
 
 function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
-    x:SendOutput("[START] export stash drop rates by item")
+    send_log(x, "[START] export stash drop rates by item")
+
+    -- treasure_manager's tiered-stash data is GAMMA-specific; skip on plain Anomaly.
+    if not (treasure_manager and treasure_manager.ini_treasure and treasure_manager.map_tiers) then
+        send_log(x, "[SKIP] export stash drop rates by item - GAMMA treasure data not present")
+        return
+    end
 
     -- Load config files
     local ini_tm   = treasure_manager.ini_treasure
@@ -3351,7 +3686,7 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     local num_tiers = 5
 
     for stash_type, ltx_section in pairs(stash_sections) do
-        local n = ini_tm:line_count(ltx_section)
+        local n = safe_line_count(ini_tm, ltx_section)
         for i = 0, n - 1 do
             local _, kind, value = ini_tm:r_line(ltx_section, i, "", "")
             if kind and value and kind ~= "" and value ~= "" then
@@ -3370,7 +3705,7 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     -- Parse possible_items: build section -> {kind, tier, allowed_ecos, name}
     local all_ecos = { 1, 2, 3 }
     local items = {}
-    local n = ini_tm:line_count("possible_items")
+    local n = safe_line_count(ini_tm, "possible_items")
     for i = 0, n - 1 do
         local _, section, value = ini_tm:r_line("possible_items", i, "", "")
         if section and section ~= "" then
@@ -3483,11 +3818,17 @@ function debug_cmd_list.cmd.export_item_drop_locations(_, txt, x)
     end
 
     out:close()
-    x:SendOutput("[END] export stash drop rates by item - %s rows written", row_count)
+    send_log(x, "[END] export stash drop rates by item - %s rows written", row_count)
 end
 
 function debug_cmd_list.cmd.export_npc_armor_profiles(_, txt, x)
-    x:SendOutput("[START] export NPC armor profiles")
+    send_log(x, "[START] export NPC armor profiles")
+
+    -- grok_bo (bones overhaul) is an optional GAMMA mod; this exporter needs it.
+    if not (grok_bo and grok_bo.ini_bones) then
+        send_log(x, "[SKIP] export NPC armor profiles - grok bones overhaul (GAMMA) not installed")
+        return
+    end
 
     local ini_bp = grok_bo.ini_bones
     local ini_capture = grok_bo.ini_capture
@@ -3572,11 +3913,11 @@ function debug_cmd_list.cmd.export_npc_armor_profiles(_, txt, x)
     end
     f:close()
 
-    x:SendOutput("[END] export NPC armor profiles - %s profiles written", cnt)
+    send_log(x, "[END] export NPC armor profiles - %s profiles written", cnt)
 end
 
 function debug_cmd_list.cmd.export_weapon_addons(_, txt, x)
-    x:SendOutput("[START] export addons")
+    send_log(x, "[START] export addons")
 
     local seen_scopes    = {}
     local seen_silencers = {}
@@ -3641,13 +3982,16 @@ function debug_cmd_list.cmd.export_weapon_addons(_, txt, x)
     local silen_cnt = write_addon_file("export_silencers.csv", seen_silencers, false)
     local gl_cnt    = write_addon_file("export_grenade_launchers.csv", seen_gls, false)
 
-    x:SendOutput("[END] export addons - %s scopes, %s silencers, %s grenade launchers", scope_cnt, silen_cnt, gl_cnt)
+    send_log(x, "[END] export addons - %s scopes, %s silencers, %s grenade launchers", scope_cnt, silen_cnt, gl_cnt)
 end
 
 function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
-    x:SendOutput("[START] export weapon addon map")
+    send_log(x, "[START] export weapon addon map")
 
     local f = file_for_write("export_weapon_addon_map.csv")
+    -- Per-weapon addon status (X-Ray EWeaponAddonStatus): 0=disabled, 1=permanent/integral, 2=attachable.
+    local fs = file_for_write("export_weapon_addon_status.csv")
+    write_csv(fs, "~", "silencer_status", "scope_status", "grenade_launcher_status")
     local cnt = 0
     local reverse = {}  -- addon_id -> list of weapon sections
 
@@ -3675,6 +4019,20 @@ function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
             end
         end
 
+        -- Addon status (X-Ray EWeaponAddonStatus): 0=disabled, 1=permanent/integral, 2=attachable.
+        -- Emit status 1 (integral, e.g. the PB's built-in silencer) AND status 2 (attachable) into the
+        -- map so the site can show both — integral ones get an "Integrated" badge downstream. Only
+        -- status 0 (disabled) is excluded. The per-weapon status row lets consumers tell them apart.
+        local scope_status = math.floor(ini_sys:r_float_ex(section, "scope_status") or 0)
+        local sil_status   = math.floor(ini_sys:r_float_ex(section, "silencer_status") or 0)
+        local gl_status    = math.floor(ini_sys:r_float_ex(section, "grenade_launcher_status") or 0)
+        write_csv(fs, section, sil_status, scope_status, gl_status)
+
+        -- The `scopes` list is the set of compatible optics. In GAMMA (Weapon Parts
+        -- Overhaul) this is populated even when scope_status is 0, so it must NOT be
+        -- gated on the X-Ray status enum -- doing so drops scopes from ~320/368 weapons
+        -- (e.g. wpn_vityaz, status 2,0,0). Emit it whenever non-empty; the status CSV
+        -- lets the consumer badge integral optics downstream.
         local scopes_raw = ini_sys:r_string_ex(section, "scopes") or ""
         if scopes_raw ~= "" then
             for _, s in ipairs(str_explode(scopes_raw, ",")) do
@@ -3682,15 +4040,17 @@ function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
                 if id ~= "" then add_addon(id) end
             end
         end
-        local scope_name = ini_sys:r_string_ex(section, "scope_name")
-        if scope_name and scope_name ~= "" then add_addon(scope_name) end
+        -- The named scope is the integral scope (status 1) or the default attachable one (status 2).
+        if scope_status == 1 or scope_status == 2 then
+            local scope_name = ini_sys:r_string_ex(section, "scope_name")
+            if scope_name and scope_name ~= "" then add_addon(scope_name) end
+        end
 
         local sil = ini_sys:r_string_ex(section, "silencer_name")
-        if sil and sil ~= "" then add_addon(sil) end
+        if sil and sil ~= "" and (sil_status == 1 or sil_status == 2) then add_addon(sil) end
 
         local gl = ini_sys:r_string_ex(section, "grenade_launcher_name")
-        local gl_status = ini_sys:r_float_ex(section, "grenade_launcher_status")
-        if gl and gl ~= "" and gl_status == 2 then add_addon(gl) end
+        if gl and gl ~= "" and (gl_status == 1 or gl_status == 2) then add_addon(gl) end
 
         if #row > 1 then
             write_csv(f, unpack(row))
@@ -3698,6 +4058,7 @@ function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
         end
     end
     f:close()
+    fs:close()
 
     -- Reverse map: addon_id, weapon_1, weapon_2, ...
     local fr = file_for_write("export_addon_weapon_map.csv")
@@ -3711,7 +4072,7 @@ function debug_cmd_list.cmd.export_weapon_addon_map(_, txt, x)
     end
     fr:close()
 
-    x:SendOutput("[END] export weapon addon map - %s weapons, %s addons written", cnt, #sorted_keys)
+    send_log(x, "[END] export weapon addon map - %s weapons, %s addons written", cnt, #sorted_keys)
 end
 
 -- Set of character IDs (from npc_profile*.xml) that have no matching <class> in character_desc files.
@@ -3817,7 +4178,7 @@ local traders = {
 }
 
 function debug_cmd_list.cmd.export_traders(_, txt, x)
-    x:SendOutput("[START] export traders")
+    send_log(x, "[START] export traders")
 
     local kind_t = {
         i_arty_junk = true, i_arty = true, i_food = true, i_drink = true, i_misc = true,
@@ -3861,7 +4222,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         local discounts = {}
         local no_value_items = {}
         for _, cond_section in ipairs(ordered) do
-            local n = ini:line_count(cond_section) or 0
+            local n = safe_line_count(ini, cond_section)
             for i = 0, n - 1 do
                 local _, item_id, mult_str = ini:r_line(cond_section, i, "", "")
                 if item_id and item_id ~= "" and (not mult_str or mult_str == "") then
@@ -3904,7 +4265,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         local discounts = {}
         local no_value_items = {}
         for _, cond_section in ipairs(ordered) do
-            local n = ini:line_count(cond_section) or 0
+            local n = safe_line_count(ini, cond_section)
             for i = 0, n - 1 do
                 local _, item_id, mult_str = ini:r_line(cond_section, i, "", "")
                 if item_id and item_id ~= "" and (not mult_str or mult_str == "") then
@@ -3974,7 +4335,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
                 write_csv_header(f, translate_headers({
                     "~", "st_data_export_quantity", "st_data_export_probability"
                 }))
-                local n = ini:line_count(sup_section) or 0
+                local n = safe_line_count(ini, sup_section)
                 for i = 0, n - 1 do
                     local _, item_id, value = ini:r_line(sup_section, i, "", "")
                     translate_with_context(ini_sys:r_string_ex(item_id, "inv_name"), "item name for " .. item_id)
@@ -3997,7 +4358,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
             "st_data_export_discount_type", "st_data_export_discount_value"
         }))
         if discounts_sec and discounts_sec ~= "" then
-            local n = ini:line_count(discounts_sec) or 0
+            local n = safe_line_count(ini, discounts_sec)
             for i = 0, n - 1 do
                 local _, dtype, dvalue = ini:r_line(discounts_sec, i, "", "")
                 if dtype and dtype ~= "" then
@@ -4027,7 +4388,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
     for _, trader in ipairs(traders) do
         local ini = ini_file(trader.config)
         if not ini then
-            x:SendOutput("export traders - SKIPPED %s (file not found)", trader.section)
+            send_log(x, "export traders - SKIPPED %s (file not found)", trader.section)
         else
             local base = "traders\\" .. trader.section .. "\\"
 
@@ -4047,7 +4408,7 @@ function debug_cmd_list.cmd.export_traders(_, txt, x)
         end
     end
 
-    x:SendOutput("[END] export traders - %s traders exported", total)
+    send_log(x, "[END] export traders - %s traders exported", total)
 end
 
 function clear_stalkers()
@@ -4055,7 +4416,7 @@ function clear_stalkers()
 end
 
 function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
-    x:SendOutput("[START] export traders mapping")
+    send_log(x, "[START] export traders mapping")
 
     local smart_location_prefix = {
         ["agr"] = "agroprom",
@@ -4103,7 +4464,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
     -- Step 1: Load squad_descr and build smart_name -> { {story_id, npc} } map
     local squad_ini = ini_file("misc\\squad_descr\\squad_descr.ltx")
     if not squad_ini then
-        x:SendOutput("export traders mapping - ERROR: squad_descr.ltx not found")
+        send_log(x, "export traders mapping - ERROR: squad_descr.ltx not found")
         return
     end
 
@@ -4226,7 +4587,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
             local smart_ini = ini_file(path)
             printf("Processing ini %s", path)
             if smart_ini and smart_ini:section_exist("exclusive") then
-                local n = smart_ini:line_count("exclusive") or 0
+                local n = safe_line_count(smart_ini, "exclusive")
                 local seen_paths = {}
                 for i = 0, n - 1 do
                     local _, _, logic_path = smart_ini:r_line("exclusive", i, "", "")
@@ -4264,7 +4625,7 @@ function debug_cmd_list.cmd.export_traders_mapping(_, txt, x)
             write_csv(f, unpack(row))
         end
         f:close()
-        x:SendOutput("[END] export traders mapping - %s trader sections mapped", #sorted)
+        send_log(x, "[END] export traders mapping - %s trader sections mapped", #sorted)
     end
 
     if #pending == 0 then
