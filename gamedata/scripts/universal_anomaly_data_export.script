@@ -3345,6 +3345,115 @@ function debug_cmd_list.cmd.export_toolkit_map_rates(_, txt, x)
     send_log(x, "[END] export toolkit map rates - %s map rows written", row_count)
 end
 
+-- utility functions
+
+local prop_name_to_param = {
+				ui_inv_accuracy = {param_name = "fire_dispersion_base", functor = "dispersion_change_to_accuracy_percent_change"},
+				ui_inv_handling = {param_name = "PDM_disp_base", functor = "PDM_change_to_handling_percent_change"},
+				st_prop_recoil = {param_name = "zoom_cam_dispersion", functor = "zoom_cam_disp_to_recoil_change"},
+				st_prop_reliability = {param_name = "condition_shot_dec", functor = "cond_shot_dec_to_relaibility_percent_change"}
+				}
+
+function dispersion_change_to_accuracy_percent_change(change)
+	local final = -(200/3 * change)
+	return final
+end
+
+function PDM_change_to_handling_percent_change(change)
+	local final = -(5/21 * change) * 100
+	return final
+end
+
+function cond_shot_dec_to_relaibility_percent_change(change)
+	local final = -10000*change
+	return final
+end
+
+local ini_eff = ini_file("plugins\\grok_bo_enhanced_recoil.ltx")
+function zoom_cam_disp_to_recoil_change(change, sec)
+	-- turns out this stat is not created by a linear equation so i cant give a direct differentiation without involving the original stat
+
+	-- made for gamma mostly
+	--copied from momopate_weaponstats.script
+
+	local zoom_cam_dispersion = 0
+	local zoom_cam_dispersion_inc = 0
+	local recoil_s = 0
+	local recoil_s_cnt = 0
+	local recoil_e = 0
+	local disp_factor = 0
+	local enhanced_cam_factor = 0
+	local max_recoil_to_normalize = 0.036036
+	
+
+	
+	local sec_p = ini_sys:r_string_ex(sec, "parent_section") or sec
+	local tbl = {}
+	
+	if not ini_eff:section_exist(sec_p) then
+		printf("!!! no effects exist for %s", sec_p)
+		return 0 												-- Safeguard to prevent crashes!
+	end
+	
+	-- Literally just copy-pasted from grok_bo_enhanced_recoil.script
+	tbl.s = {}
+	local s = ini_eff:r_string_ex(sec_p,"s")
+	local _s = str_explode(s,",")
+	for i=1,#_s do
+		tbl.s[#tbl.s + 1] = tonumber(_s[i])
+	end
+	
+	tbl.e = {}
+	local e = ini_eff:r_string_ex(sec_p,"e")
+	local _e = str_explode(e,",")
+	for i=1,#_e do
+		local __e = str_explode(_e[i],":")
+		for j=1,#__e do
+			if (tonumber(__e[j]) > 0) then 
+				tbl.e[#tbl.e + 1] = tonumber(__e[j])
+			end
+		end
+		--tbl.e[#tbl.e + 1] = __e
+	end
+	
+	local zoom_cam_dispersion = utils_item.get_param(sec, nil, "zoom_cam_dispersion", "float", true) or 0 
+	local zoom_cam_dispersion_inc = utils_item.get_param(sec, nil, "zoom_cam_dispersion_inc", "float", true) or 0
+	
+	local final_zoom_cam_dispersion = zoom_cam_dispersion + change
+
+	for i = 1, #tbl.s do
+		recoil_s = recoil_s + tonumber(tbl.s[i])
+		recoil_s_cnt = recoil_s_cnt + 1
+	end
+	recoil_s = (recoil_s / recoil_s_cnt)
+
+	local recoil_e = tonumber(tbl.e[2]) or 1
+	
+	local disp_factor = 1 / ( zoom_cam_dispersion )
+	
+	local final_disp_factor = 1 / ( final_zoom_cam_dispersion )
+	
+	local enhanced_cam_factor = 1 / ( recoil_s + recoil_s + recoil_s + recoil_e )
+
+	printf("/// Recoil config: Disp = %s + %s / Cam = %s + %s", zoom_cam_dispersion, zoom_cam_dispersion_inc * 0.1, recoil_s, recoil_e)
+
+
+	final_recoil = ( disp_factor * enhanced_cam_factor ) * 100
+	if final_recoil < 1 then
+		final_recoil = 1
+	end
+	
+	final_recoil_post_upg = ( final_disp_factor * enhanced_cam_factor ) * 100
+	if final_recoil_post_upg < 1 then
+		final_recoil_post_upg = 1
+	end
+	
+	printf("final_recoil is %s, final_recoil_post_upg is %s, section is %s, ververver", final_recoil, final_recoil_post_upg, sec)
+	-- return (final_recoil)
+
+	return final_recoil_post_upg - final_recoil
+end
+
 function debug_cmd_list.cmd.export_upgrades(_, txt, x)
     send_log(x, "[START] export upgrades")
 
@@ -3452,10 +3561,18 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
                 parts[#parts+1] = u.cell
                 parts[#parts+1] = translate_with_context(property_name, "upgrade property for " .. u.sec)
                 parts[#parts+1] = property_value
+                if prop_name_to_param[property_name] then
+					local stat_change = char_ini:r_float_ex(u.stats, prop_name_to_param[property_name].param_name or "") or 0
+					local final_percent_change = universal_anomaly_data_export[prop_name_to_param[property_name].functor](stat_change, sec)
+					printf("percent change logged")
+					local prefix = final_percent_change > 0 and "+" or ""
+					parts[#parts+1] = prefix .. tostring(final_percent_change)
+				end
                 parts[#parts+1] = translate_with_context(u.uname, "upgrade name for " .. u.sec)
                 parts[#parts+1] = translate_with_context(u.desc, "upgrade description for " .. u.sec)
                 parts[#parts+1] = u.stats
             else
+                parts[#parts+1] = ""
                 parts[#parts+1] = ""
                 parts[#parts+1] = ""
                 parts[#parts+1] = ""
