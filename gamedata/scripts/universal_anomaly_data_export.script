@@ -3567,6 +3567,8 @@ function debug_cmd_list.cmd.export_upgrades(_, txt, x)
 					printf("percent change logged")
 					local prefix = final_percent_change > 0 and "+" or ""
 					parts[#parts+1] = prefix .. tostring(final_percent_change)
+                else
+                    parts[#parts+1] = ""
 				end
                 parts[#parts+1] = translate_with_context(u.uname, "upgrade name for " .. u.sec)
                 parts[#parts+1] = translate_with_context(u.desc, "upgrade description for " .. u.sec)
